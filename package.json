@@ -1,0 +1,9 @@
+{
+  "name": "hearts-of-atom",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "bun server.ts",
+    "start": "bun server.ts"
+  }
+}
