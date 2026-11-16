@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Bun / build output
+dist/
+build/
+.cache/
+
+# Env
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+bun-debug.log*
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings
+.claude/settings.local.json
