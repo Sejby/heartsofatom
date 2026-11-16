@@ -4,7 +4,7 @@ Velká strategie v reálném čase ve stylu grand strategy her, zasazená do sou
 
 ## Spuštění
 
-Otevřete `index.html` v prohlížeči (Chrome, Edge, Firefox nebo Safari). Hra nepotřebuje server, sestavení ani internet. Všechny knihovny (d3, topojson) i mapová data jsou ve složkách `vendor/` a `data/`.
+Otevřete `index.html` v prohlížeči (Chrome, Edge, Firefox nebo Safari). Hra nepotřebuje server, sestavení ani internet. Všechny knihovny (MapLibre GL, Preact, d3, topojson…) i mapová data jsou ve složkách `vendor/` a `data/`. Prohlížeč musí podporovat WebGL.
 
 Přes Bun: `bun run dev` a pak otevřete http://localhost:3000 (jiný port: `PORT=8080 bun run dev`).
 
@@ -12,7 +12,7 @@ Rychlý start pro vývoj: `index.html#play=CZE&days=30` spustí hru za Česko a 
 
 ## Co hra obsahuje
 
-- **3D glóbus**, který jde otáčet a přibližovat. Pevnina vrhá stín, takže působí vystouple (2.5D). Mapa používá skutečné administrativní regiony (Natural Earth admin-1): ukrajinské oblasti, české kraje, německé spolkové země, polská vojvodství, ruské subjekty, státy USA a další. Celkem 3 294 regionů ve 195 státech. Velké regiony (Sibiř, Kanada…) a oblasti ve válečné zóně jsou rozdělené na menší části, takže provincií je celkem ~3 750.
+- **3D glóbus** vykreslovaný přes WebGL (MapLibre GL, globe projekce), který jde otáčet a přibližovat. Pevnina vrhá stín, takže působí vystouple (2.5D). Mapa používá skutečné administrativní regiony (Natural Earth admin-1): ukrajinské oblasti, české kraje, německé spolkové země, polská vojvodství, ruské subjekty, státy USA a další. Celkem 3 294 regionů ve 195 státech. Velké regiony (Sibiř, Kanada…) a oblasti ve válečné zóně jsou rozdělené na menší části, takže provincií je celkem ~3 750.
 - **Mapové režimy:** politický, aliance, ideologie, vztahy a válka. Okupovaná území jsou šrafovaná barvou vlastníka a fronta je vyznačená červenou linií.
 - **Jednotky** se na mapě zobrazují jako žetony s armádními symboly (pěchota, mechanizovaná, tanková, dělostřelecká, výsadková, PVO a drony). Pod žetonem je ukazatel organizace a síly. Vidíte šipky pohybu, ikony bitev, zákopy a opevnění.
 - **Boj:** rozhoduje útok proti obraně, organizace, síla, šířka fronty, opevnění, zákopy, letecká převaha a obrana proti dronům. Jednotky ustupují, mohou být obklíčeny a města kladou odpor.
@@ -25,7 +25,7 @@ Rychlý start pro vývoj: `index.html#play=CZE&days=30` spustí hru za Česko a 
 - **Diplomacie:** zlepšování vztahů, vojenský přístup, pozvání do aliance, žádost o vstup, založení vlastní aliance, garance, finanční a vojenská pomoc, sankce, válečné cíle, vyhlášení války, mírová jednání (bílý mír, příměří na linii fronty, postoupení území) a kapitulace.
 - **Jaderné zbraně:** úder na provincii, protiraketový štít, odveta AI, radiace a dopady na diplomacii.
 - **AI** řídí ekonomiku, výzkum, národní cíle, pomoc spojencům, sankce, mír a frontu. Frontu může AI řídit i za vás, přepínač je v panelu Armáda.
-- **Ukládání hry** do prohlížeče (localStorage).
+- **Ukládání hry** do prohlížeče (IndexedDB). Starší uložené hry z localStorage se při spuštění samy přesunou.
 
 ## Ovládání
 
@@ -47,18 +47,21 @@ css/style.css       vzhled UI
 data/regions.js     skutečné regiony (Natural Earth 1:10m admin-1, zjednodušeno)
 tools/              build-regions.js – generátor data/regions.js
 server.ts           vývojový server pro Bun (bun run dev)
-vendor/             d3 7.9, topojson-client 3.1
+vendor/             maplibre-gl 5.24, preact 10.29 + htm 3.1, idb-keyval 6.2,
+                    polygon-clipping 0.15, d3 7.9, topojson-client 3.1
 js/countries.js     státy, vlády, armády, města
 js/rules.js         jednotky, výbava, technologie, trh zbraní, zákony
 js/focus.js         stromy národních cílů
 js/events.js        historické události
-js/world.js         regiony → provincie, sousedství, úrovně detailu hranic
+js/world.js         regiony → provincie, sousedství, hranice
 js/state.js         herní stav, vztahy, války, aliance
 js/sim.js           simulace: pohyb, boj, ekonomika, výzkum, události, kapitulace, jaderné zbraně
 js/ai.js            umělá inteligence
-js/render.js        vykreslování glóbu a jednotek (Canvas 2D)
+js/render.js        mapa ve WebGL (MapLibre: provincie, hranice, fronta, okupace)
+                    + 2D vrstva nad ní (žetony jednotek, šipky, bitvy, popisky)
 js/flags.js         zjednodušené vlajky
-js/ui.js, main.js   rozhraní, ovládání a hlavní smyčka
+js/ui.js            rozhraní v Preactu (htm, bez build kroku), ukládání do IndexedDB
+js/main.js          start, ovládání a hlavní smyčka
 ```
 
 ## Poznámky

@@ -1,8 +1,14 @@
-// HTML user interface: top bar, panels, side info, focus tree, events, start screen.
+// User interface (Preact + htm, no build step): top bar, panels, side info, focus tree, events,
+// start screen. All UI state lives in HOA.UI; any change calls HOA.uiRefresh(), which re-renders
+// the whole tree and lets Preact patch only what changed in the DOM.
 window.HOA = window.HOA || {};
 
-const $ = (s) => document.querySelector(s);
+const { h: hh, render: preactRender } = preact;
+const html = htm.bind(hh);
+const IDB = window.idbKeyval;
+
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+HOA.esc = esc;
 const pct = (x) => Math.round(x * 100) + ' %';
 const fmtN = (n) => {
   const a = Math.abs(n);
@@ -13,7 +19,80 @@ const fmtN = (n) => {
 const money = (x) => '$' + (x >= 100 ? Math.round(x) : x.toFixed(1).replace('.', ',')) + ' mld';
 HOA.fmtN = fmtN;
 
-HOA.UI = { panel: null, side: null, invites: [] };
+HOA.UI = {
+  panel: null, side: null, countryTag: null, dipQuery: '',
+  focusOpen: false, menuOpen: false, modal: null, toasts: [], hasSave: false,
+};
+
+// ---------- rendering ----------
+let refreshQueued = false;
+HOA.uiRefresh = function () {
+  if (refreshQueued) return;
+  refreshQueued = true;
+  queueMicrotask(() => {
+    refreshQueued = false;
+    preactRender(html`<${App} />`, document.getElementById('ui'));
+  });
+};
+// legacy entry points used by the game modules
+HOA.renderTop = HOA.renderTicker = HOA.renderPanel = HOA.renderSide = HOA.renderStart = HOA.uiRefresh;
+
+// click handler for an action; re-renders afterwards
+const on = (act, arg) => (e) => { e.stopPropagation(); HOA.act(act, arg, e.currentTarget); HOA.uiRefresh(); };
+const Bar = ({ v, cls }) => html`<div class="bar ${cls || ''}"><i style=${{ width: Math.max(0, Math.min(100, v * 100)) + '%' }}></i></div>`;
+const Flag = ({ tag, w, h, cls }) => html`<img class="flag ${cls || ''}" src=${HOA.flagURL(tag, w, h)} />`;
+const Lines = ({ list }) => list.map((t, i) => html`${i ? html`<br />` : ''}${t}`);
+
+// ---------- icons ----------
+// Small stroke icon set (24×24, currentColor) used instead of emoji glyphs.
+const trefoil = (() => {
+  const P = (a, r) => `${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
+  let d = '';
+  for (let k = 0; k < 3; k++) {
+    const a0 = -Math.PI / 2 - Math.PI / 6 + (k * 2 * Math.PI) / 3, a1 = a0 + Math.PI / 3;
+    d += `M${P(a0, 3)}L${P(a0, 9)}A9 9 0 0 1 ${P(a1, 9)}L${P(a1, 3)}A3 3 0 0 0 ${P(a0, 3)}Z`;
+  }
+  return `<path d="${d}" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>`;
+})();
+const ICONS = {
+  politics: '<path d="M3 21h18M5 10v11M9.5 10v11M14.5 10v11M19 10v11M2.5 10 12 3.5l9.5 6.5z"/>',
+  research: '<path d="M9 3h6M10 3v6.5L4.6 19a1.4 1.4 0 0 0 1.2 2h12.4a1.4 1.4 0 0 0 1.2-2L14 9.5V3M7.2 15h9.6"/>',
+  factory: '<path d="M2 21h20M3 21V10l5 3.5V10l5 3.5V10l5 3.5V4h3v17"/>',
+  shield: '<path d="M12 3 4.5 6v6c0 4.4 3.2 7.9 7.5 9 4.3-1.1 7.5-4.6 7.5-9V6z"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  cart: '<path d="M3 4h2.5l2.2 10.5h10.6L20.5 7H6.3"/><circle cx="9" cy="19.5" r="1.3"/><circle cx="17" cy="19.5" r="1.3"/>',
+  swords: '<path d="M4 4l10 10M20 4 10 14M13 17l4-4M11 17l-4-4M16 16l4 4M8 16l-4 4"/>',
+  news: '<rect x="3" y="4" width="18" height="16"/><path d="M7 8h10M7 12h4M7 16h4M14 12h3v4h-3z"/>',
+  star: '<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.9z"/>',
+  scale: '<path d="M12 4v16M7.5 20h9M4.5 7h15M6.5 7l-3 7a3 3 0 0 0 6 0zM17.5 7l-3 7a3 3 0 0 0 6 0z"/>',
+  flag: '<path d="M5 21V4M5 4h12.5l-2.5 4 2.5 4H5"/>',
+  people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
+  money: '<circle cx="12" cy="12" r="9"/><path d="M15 9.4C14.5 8.5 13.4 8 12 8c-1.7 0-3 .8-3 2s1.3 1.6 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.4M12 6v2M12 16v2"/>',
+  nuke: trefoil,
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  pause: '<path d="M9 5v14M15 5v14"/>',
+  play: '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  save: '<path d="M5 3h11l3 3v15H5zM8 3v5h7V3M8 21v-7h8v7"/>',
+  folder: '<path d="M3 5.5h6l2 2.5h10v12H3z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.2v.3"/>',
+  reset: '<path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4"/>',
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  check: '<path d="M5 12.5 10 17.5 19 7"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.5 5.5 3.5 9s-1.1 6.5-3.5 9c-2.4-2.5-3.5-5.5-3.5-9S9.6 5.5 12 3z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  inf: '<circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5"/>',
+  arm: '<rect x="2.5" y="12" width="19" height="6.5" rx="3.2"/><path d="M6.5 12V8.5h8.5V12M15 9.8h6.5"/>',
+  art: '<path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5M5.3 5.3l3.5 3.5M15.2 15.2l3.5 3.5M18.7 5.3l-3.5 3.5M8.8 15.2l-3.5 3.5"/>',
+  aa: '<path d="M4 21h16M12 21v-6M5 8.5a7 7 0 0 0 14 0zM12 8.5 16 3"/>',
+  drn: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8 8l8 8M16 8l-8 8"/>',
+  air: '<path d="M12 2.5c.8 0 1.3.9 1.3 2v5l7.7 4.5v2l-7.7-2.5v4.6l2.2 1.7v1.7L12 20.7l-3.5.8v-1.7l2.2-1.7v-4.6L3 16v-2l7.7-4.5v-5c0-1.1.5-2 1.3-2z"/>',
+};
+const Icon = ({ n, cls }) => html`<svg class="ic ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true" dangerouslySetInnerHTML=${{ __html: ICONS[n] || '' }}></svg>`;
+HOA.Icon = Icon;
 
 // ---------- effect descriptions ----------
 HOA.unitTypeName = (t) => (t === 'all' ? 'všech jednotek' : HOA.UNITS[t] ? HOA.UNITS[t].name : t);
@@ -64,20 +143,9 @@ HOA.describeEff = function (S, eff) {
 };
 
 // ---------- init ----------
-HOA.uiInit = function () {
-  document.addEventListener('click', (e) => {
-    const el = e.target.closest('[data-act]');
-    if (!el) return;
-    e.stopPropagation();
-    HOA.act(el.dataset.act, el.dataset.arg, el);
-  });
-  document.addEventListener('input', (e) => {
-    const el = e.target;
-    if (el.dataset.prod) HOA.setProd(el.dataset.prod, +el.value / 100);
-    if (el.id === 'dipSearch') HOA.filterDip();
-  });
+HOA.uiInit = async function () {
   HOA.onNews = (text, kind) => {
-    HOA.renderTicker();
+    HOA.uiRefresh();
     if (kind === 'major' || kind === 'own' || kind === 'war' && /vyhlásil|obklíčena/.test(text)) HOA.toast(text, kind);
   };
   HOA.onMessage = (t) => HOA.toast(t, 'warn');
@@ -85,278 +153,268 @@ HOA.uiInit = function () {
   HOA.onPeaceOffer = (tag) => HOA.peaceOfferModal(tag);
   HOA.onCapitulate = (tag, winner) => {
     const S = HOA.S;
-    if (tag === S.player) HOA.modal(`<h2>Kapitulace</h2><p>${esc(S.countries[tag].name)} kapitulovalo. ${S.countries[tag].alive ? 'Vláda přežila na zbytku území.' : 'Stát přestal existovat.'}</p>`, [{ t: S.countries[tag].alive ? 'Pokračovat' : 'Nová hra', act: S.countries[tag].alive ? 'closeModal' : 'newGame' }]);
-    else if (winner === S.player) HOA.modal(`<h2>Vítězství!</h2><p>${esc(S.countries[tag].name)} kapitulovalo před vašimi vojsky. Okupovaná území připadla vám.</p>`, [{ t: 'Výborně', act: 'closeModal' }]);
+    const c = S.countries[tag];
+    if (tag === S.player) HOA.modal(html`<h2>Kapitulace</h2><p>${c.name} kapitulovalo. ${c.alive ? 'Vláda přežila na zbytku území.' : 'Stát přestal existovat.'}</p>`, [{ t: c.alive ? 'Pokračovat' : 'Nová hra', act: c.alive ? 'closeModal' : 'newGame' }]);
+    else if (winner === S.player) HOA.modal(html`<h2>Vítězství!</h2><p>${c.name} kapitulovalo před vašimi vojsky. Okupovaná území připadla vám.</p>`, [{ t: 'Výborně', act: 'closeModal' }]);
   };
   HOA.queueInvite = (tag, fid) => {
-    const S = HOA.S;
-    HOA.modal(`<h2>Pozvánka do aliance</h2><p>Byli jste pozváni do aliance <b>${esc(S.factions[fid].name)}</b>.</p>`, [{ t: 'Přijmout', act: 'acceptInvite', arg: fid }, { t: 'Odmítnout', act: 'closeModal' }]);
+    HOA.modal(html`<h2>Pozvánka do aliance</h2><p>Byli jste pozváni do aliance <b>${HOA.S.factions[fid].name}</b>.</p>`, [{ t: 'Přijmout', act: 'acceptInvite', arg: fid }, { t: 'Odmítnout', act: 'closeModal' }]);
   };
+  await HOA.migrateStorage();
+  try { HOA.UI.hasSave = (await IDB.get('hoa_save')) != null; } catch (e) { HOA.UI.hasSave = false; }
+  HOA.uiRefresh();
 };
 
+let toastId = 0;
 HOA.toast = function (text, kind) {
-  const box = $('#toasts');
-  const d = document.createElement('div');
-  d.className = 'toast ' + (kind || '');
-  d.textContent = text;
-  box.appendChild(d);
-  setTimeout(() => d.classList.add('out'), 4200);
-  setTimeout(() => d.remove(), 4800);
-  while (box.children.length > 5) box.firstChild.remove();
+  const UI = HOA.UI;
+  const t = { id: ++toastId, text, kind: kind || '', out: false };
+  UI.toasts = UI.toasts.concat(t).slice(-5);
+  setTimeout(() => { t.out = true; HOA.uiRefresh(); }, 4200);
+  setTimeout(() => { UI.toasts = UI.toasts.filter((x) => x !== t); HOA.uiRefresh(); }, 4800);
+  HOA.uiRefresh();
 };
 
-// ---------- top bar ----------
-HOA.renderTop = function () {
-  const S = HOA.S;
+// ---------- app shell ----------
+HOA.PANELS = {
+  politics: 'Politika', research: 'Výzkum', production: 'Výroba', army: 'Armáda',
+  diplomacy: 'Diplomacie', market: 'Trh zbraní', wars: 'Války', news: 'Zprávy',
+};
+const LEFT = [['politics', 'politics', 'Politika', 'Politika a národní cíle'], ['research', 'research', 'Výzkum', 'Výzkum'], ['production', 'factory', 'Výroba', 'Výroba a stavby'], ['army', 'shield', 'Armáda', 'Armáda'], ['diplomacy', 'link', 'Diplomacie', 'Diplomacie'], ['market', 'cart', 'Trh', 'Trh zbraní'], ['wars', 'swords', 'Války', 'Války'], ['news', 'news', 'Zprávy', 'Zprávy']];
+const MODES = [['political', 'Politická'], ['faction', 'Aliance'], ['ideology', 'Ideologie'], ['relations', 'Vztahy', 'ingame'], ['war', 'Válka', 'ingame']];
+
+function App() {
+  const S = HOA.S, UI = HOA.UI;
+  return html`
+    <${TopBar} />
+    <div id="leftbar" class="ingame">
+      ${LEFT.map(([k, ic, label, tip]) => html`<button key=${k} class=${UI.panel === k ? 'on' : ''} title=${tip} onClick=${on('panel', k)}><${Icon} n=${ic} /><span>${label}</span></button>`)}
+    </div>
+    <${Panel} />
+    <${Side} />
+    <div id="ticker" class="ingame">${S.news.slice(0, 6).map((n, i) => html`<div key=${i} class="tk ${n.kind}"><span>${HOA.fmtDate(n.t)}</span> ${n.text}</div>`)}</div>
+    <div id="mapmodes">
+      ${MODES.map(([k, label, cls]) => html`<button key=${k} class=${(HOA.R.mode === k ? 'on ' : '') + (cls || '')} onClick=${on('mode', k)}>${label}</button>`)}
+    </div>
+    ${UI.focusOpen && S.player ? html`<${FocusTree} />` : null}
+    ${UI.modal ? html`<${Modal} m=${UI.modal} />` : null}
+    <div id="toasts">${UI.toasts.map((t) => html`<div key=${t.id} class="toast ${t.kind} ${t.out ? 'out' : ''}">${t.text}</div>`)}</div>
+    ${S.player ? null : html`<${Start} />`}`;
+}
+
+function TopBar() {
+  const S = HOA.S, UI = HOA.UI;
   const c = S.countries[S.player];
-  if (!c) return;
-  const units = S.units.filter((u) => u.tag === c.tag).length;
-  const stat = (icon, val, tip, cls) => `<div class="stat ${cls || ''}" title="${esc(tip)}"><span class="ic">${icon}</span>${val}</div>`;
-  $('#topbar .tb-country').innerHTML = `<img class="flag" src="${HOA.flagURL(c.tag, 48, 32)}"><div><div class="tb-name">${esc(c.name)}</div><div class="tb-leader">${esc(c.leader)}</div></div>`;
-  $('#topbar .tb-stats').innerHTML = [
-    stat('⚜', Math.round(c.pp), 'Politická moc – utrácí se za národní cíle, zákony a diplomacii'),
-    stat('⚖', pct(c.stab), 'Stabilita'),
-    stat('✊', pct(c.ws), 'Válečná podpora'),
-    stat('👥', fmtN(c.mp * 1000), 'Dostupné lidské zdroje'),
-    stat('$', money(c.money), 'Státní pokladna (rozpočet na obranu)'),
-    stat('🏭', `${c.civ}/${c.mil}`, 'Civilní / vojenské továrny'),
-    stat('⚔', units + (c.training.length ? `+${c.training.length}` : ''), 'Divize (v poli + ve výcviku)'),
-    stat('☢', c.nukes, 'Jaderné hlavice', c.nukes ? '' : 'dim'),
-  ].join('');
-  $('#topbar .tb-date').textContent = HOA.fmtDate(S.t, true);
-  document.querySelectorAll('.spd').forEach((b) => b.classList.toggle('on', +b.dataset.arg === S.speed && !S.paused));
-  $('#pauseBtn').classList.toggle('on', S.paused);
-  $('#pauseBtn').textContent = S.paused ? '▶' : '❚❚';
-  const tens = $('#tension');
-  tens.style.width = S.tension + '%';
-  tens.parentElement.title = `Světové napětí: ${Math.round(S.tension)} %`;
-};
-
-HOA.renderTicker = function () {
-  const S = HOA.S;
-  const el = $('#ticker');
-  if (!el) return;
-  el.innerHTML = S.news.slice(0, 6).map((n) => `<div class="tk ${n.kind}"><span>${HOA.fmtDate(n.t)}</span> ${esc(n.text)}</div>`).join('');
-};
+  const stat = (icon, label, val, tip, cls) => html`<div class="stat ${cls || ''}" title=${tip}><span class="sl"><${Icon} n=${icon} />${label}</span><b>${val}</b></div>`;
+  const d = new Date(S.t);
+  const units = c ? S.units.filter((u) => u.tag === c.tag).length : 0;
+  return html`<div id="topbar" class="ingame">
+    <div class="tb-country">${c ? html`<${Flag} tag=${c.tag} w=${48} h=${32} /><div><div class="tb-name">${c.name}</div><div class="tb-leader">${c.leader}</div></div>` : null}</div>
+    <div class="tb-stats">${c ? [
+      stat('star', 'Pol. moc', Math.round(c.pp), 'Politická moc – utrácí se za národní cíle, zákony a diplomacii'),
+      stat('scale', 'Stabilita', pct(c.stab), 'Stabilita'),
+      stat('flag', 'Vál. podpora', pct(c.ws), 'Válečná podpora'),
+      stat('people', 'Lidské zdroje', fmtN(c.mp * 1000), 'Dostupné lidské zdroje'),
+      stat('money', 'Pokladna', money(c.money), 'Státní pokladna (rozpočet na obranu)'),
+      stat('factory', 'Továrny C/V', `${c.civ}/${c.mil}`, 'Civilní / vojenské továrny'),
+      stat('shield', 'Divize', units + (c.training.length ? `+${c.training.length}` : ''), 'Divize (v poli + ve výcviku)'),
+      stat('nuke', 'Hlavice', c.nukes, 'Jaderné hlavice', c.nukes ? '' : 'dim'),
+    ] : null}</div>
+    <div class="tb-time">
+      <div class="tension" title=${`Světové napětí: ${Math.round(S.tension)} %`}><i id="tension" style=${{ width: S.tension + '%' }}></i></div>
+      <div class="tb-date">${HOA.fmtDate(S.t)}<small>${String(d.getUTCHours()).padStart(2, '0')}:00</small></div>
+      <div class="speeds">
+        <button id="pauseBtn" class=${S.paused ? 'on' : ''} title="Pauza (mezerník)" onClick=${on('pause')}><${Icon} n=${S.paused ? 'play' : 'pause'} /></button>
+        ${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class="spd ${n === S.speed && !S.paused ? 'on' : ''}" onClick=${on('speed', n)}>${n}</button>`)}
+      </div>
+    </div>
+    <button class="menubtn" title="Menu" onClick=${on('menu')}><${Icon} n="menu" /></button>
+    <div id="menu" class=${UI.menuOpen ? '' : 'hidden'}>
+      <button onClick=${on('save')}><${Icon} n="save" />Uložit hru</button>
+      <button onClick=${on('load')}><${Icon} n="folder" />Načíst hru</button>
+      <button onClick=${on('help')}><${Icon} n="help" />Jak hrát</button>
+      <button onClick=${on('newGame')}><${Icon} n="reset" />Nová hra</button>
+    </div>
+  </div>`;
+}
 
 // ---------- panels ----------
-HOA.PANELS = {
-  politics: '🏛 Politika', research: '🔬 Výzkum', production: '🏭 Výroba', army: '🎖 Armáda',
-  diplomacy: '🤝 Diplomacie', market: '🛒 Trh zbraní', wars: '⚔ Války', news: '📰 Zprávy',
-};
 HOA.openPanel = function (key) {
   HOA.UI.panel = HOA.UI.panel === key ? null : key;
-  document.querySelectorAll('#leftbar button').forEach((b) => b.classList.toggle('on', b.dataset.arg === HOA.UI.panel));
-  HOA.renderPanel();
-};
-HOA.renderPanel = function () {
-  const el = $('#panel');
-  const key = HOA.UI.panel;
-  if (!key) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  const search = $('#dipSearch');
-  const keep = search ? { v: search.value, s: search.selectionStart } : null;
-  const scroll = el.querySelector('.pbody') ? el.querySelector('.pbody').scrollTop : 0;
-  const title = key === 'country' && HOA.S.countries[HOA.UI.countryTag] ? '👤 ' + esc(HOA.S.countries[HOA.UI.countryTag].name) : HOA.PANELS[key];
-  el.innerHTML = `<div class="phead">${title}<button class="x" data-act="closePanel">✕</button></div><div class="pbody">${HOA['panel_' + key]()}</div>`;
-  el.querySelector('.pbody').scrollTop = scroll;
-  const s2 = $('#dipSearch');
-  if (keep && s2) { s2.value = keep.v; HOA.filterDip(); }
+  HOA.uiRefresh();
 };
 
-HOA.bar = (v, cls) => `<div class="bar ${cls || ''}"><i style="width:${Math.max(0, Math.min(100, v * 100))}%"></i></div>`;
+function Panel() {
+  const S = HOA.S, key = HOA.UI.panel;
+  if (!key || !S.player) return html`<div id="panel" class="hidden"></div>`;
+  const title = key === 'country' && S.countries[HOA.UI.countryTag] ? S.countries[HOA.UI.countryTag].name : HOA.PANELS[key];
+  const Body = PANEL_BODY[key];
+  return html`<div id="panel">
+    <div class="phead">${title}<button class="x" onClick=${on('closePanel')} title="Zavřít"><${Icon} n="x" /></button></div>
+    <div class="pbody" key=${key === 'country' ? 'country:' + HOA.UI.countryTag : key}><${Body} /></div>
+  </div>`;
+}
 
-HOA.panel_politics = function () {
+function PoliticsPanel() {
   const S = HOA.S, c = S.countries[S.player];
   const tree = HOA.focusTreeFor(c.tag);
   const cur = c.focus.cur && tree.find((f) => f.id === c.focus.cur);
-  let h = `<div class="leader"><img class="flag big" src="${HOA.flagURL(c.tag, 72, 48)}"><div><b>${esc(c.leader)}</b><div class="muted">${esc(c.gov)}</div><div class="muted">${HOA.IDEOLOGIES[c.ideo].name}${c.faction ? ' • ' + esc(S.factions[c.faction].name) : ''}</div></div></div>`;
-  h += `<div class="kv"><span>Stabilita</span>${HOA.bar(c.stab)}<b>${pct(c.stab)}</b></div>`;
-  h += `<div class="kv"><span>Válečná podpora</span>${HOA.bar(c.ws, 'red')}<b>${pct(c.ws)}</b></div>`;
-  h += `<div class="kv"><span>HDP</span><b>${money(c.gdp)}</b></div>`;
-  h += `<div class="kv"><span>Populace</span><b>${c.pop.toLocaleString('cs-CZ')} mil.</b></div>`;
-  if (c.sanctions.length) h += `<div class="kv warn"><span>Sankce</span><b>${c.sanctions.length} států (−${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} % HDP)</b></div>`;
   const tm = (c.tmods || []).filter((t) => t.until > S.t);
-  if (tm.length) {
-    h += `<h3>Dočasné modifikátory</h3>`;
-    for (const t of tm) h += `<div class="card"><b>${esc(t.name)}</b> <small>do ${HOA.fmtDate(t.until)}</small><div class="muted small">${esc(t.desc || '')}</div><small class="eff">${t.att ? `Útok ${t.att > 0 ? '+' : ''}${Math.round(t.att * 100)} % ` : ''}${t.def ? `Obrana ${t.def > 0 ? '+' : ''}${Math.round(t.def * 100)} %` : ''}</small></div>`;
-  }
-  h += `<h3>Národní cíl</h3>`;
-  if (cur) h += `<div class="card"><b>${esc(cur.name)}</b>${HOA.bar(c.focus.prog / cur.days, 'gold')}<div class="muted">${c.focus.prog} / ${cur.days} dní</div></div>`;
-  else h += `<div class="card warn">Není vybrán žádný národní cíl!</div>`;
-  h += `<button class="btn wide gold" data-act="focusTree">Otevřít strom národních cílů</button>`;
-  h += `<h3>Zákony</h3>`;
-  for (const cat in HOA.LAWS) {
-    const L = HOA.LAWS[cat];
-    h += `<div class="lawcat">${L.name}</div><div class="laws">`;
-    for (const o of L.opts) {
-      const on = c.laws[cat] === o.id;
-      const locked = o.req === 'war' && !c.atWar;
-      h += `<button class="law ${on ? 'on' : ''}" ${on || locked ? 'disabled' : ''} data-act="setLaw" data-arg="${cat}:${o.id}" title="${esc(o.desc)}${locked ? ' (vyžaduje válku)' : ''}">${esc(o.name)}<small>${on ? 'aktivní' : o.pp + ' PM'}</small></button>`;
-    }
-    h += `</div>`;
-  }
-  h += `<h3>Aliance</h3>`;
-  if (c.faction) h += `<div class="card">${esc(S.factions[c.faction].name)} – ${S.factions[c.faction].members.length} členů<br><button class="btn" data-act="leaveFaction">Opustit alianci</button></div>`;
-  else h += `<button class="btn wide" data-act="createFaction">Založit novou alianci (100 PM)</button>`;
-  return h;
-};
+  return html`
+    <div class="leader"><${Flag} tag=${c.tag} w=${72} h=${48} cls="big" /><div><b>${c.leader}</b><div class="muted">${c.gov}</div><div class="muted">${HOA.IDEOLOGIES[c.ideo].name}${c.faction ? ' • ' + S.factions[c.faction].name : ''}</div></div></div>
+    <div class="kv"><span>Stabilita</span><${Bar} v=${c.stab} /><b>${pct(c.stab)}</b></div>
+    <div class="kv"><span>Válečná podpora</span><${Bar} v=${c.ws} cls="red" /><b>${pct(c.ws)}</b></div>
+    <div class="kv"><span>HDP</span><b>${money(c.gdp)}</b></div>
+    <div class="kv"><span>Populace</span><b>${c.pop.toLocaleString('cs-CZ')} mil.</b></div>
+    ${c.sanctions.length ? html`<div class="kv warn"><span>Sankce</span><b>${c.sanctions.length} států (−${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} % HDP)</b></div>` : null}
+    ${tm.length ? html`<h3>Dočasné modifikátory</h3>${tm.map((t, i) => html`<div key=${i} class="card"><b>${t.name}</b> <small>do ${HOA.fmtDate(t.until)}</small><div class="muted small">${t.desc || ''}</div><small class="eff">${t.att ? `Útok ${t.att > 0 ? '+' : ''}${Math.round(t.att * 100)} % ` : ''}${t.def ? `Obrana ${t.def > 0 ? '+' : ''}${Math.round(t.def * 100)} %` : ''}</small></div>`)}` : null}
+    <h3>Národní cíl</h3>
+    ${cur ? html`<div class="card"><b>${cur.name}</b><${Bar} v=${c.focus.prog / cur.days} cls="gold" /><div class="muted">${c.focus.prog} / ${cur.days} dní</div></div>` : html`<div class="card warn">Není vybrán žádný národní cíl!</div>`}
+    <button class="btn wide gold" onClick=${on('focusTree')}>Otevřít strom národních cílů</button>
+    <h3>Zákony</h3>
+    ${Object.keys(HOA.LAWS).map((cat) => {
+      const L = HOA.LAWS[cat];
+      return html`<div key=${cat}><div class="lawcat">${L.name}</div><div class="laws">${L.opts.map((o) => {
+        const isOn = c.laws[cat] === o.id;
+        const locked = o.req === 'war' && !c.atWar;
+        return html`<button key=${o.id} class="law ${isOn ? 'on' : ''}" disabled=${isOn || locked} title=${o.desc + (locked ? ' (vyžaduje válku)' : '')} onClick=${on('setLaw', cat + ':' + o.id)}>${o.name}<small>${isOn ? 'aktivní' : o.pp + ' PM'}</small></button>`;
+      })}</div></div>`;
+    })}
+    <h3>Aliance</h3>
+    ${c.faction ? html`<div class="card">${S.factions[c.faction].name} – ${S.factions[c.faction].members.length} členů<br /><button class="btn" onClick=${on('leaveFaction')}>Opustit alianci</button></div>`
+      : html`<button class="btn wide" onClick=${on('createFaction')}>Založit novou alianci (100 PM)</button>`}`;
+}
 
-HOA.panel_research = function () {
+function ResearchPanel() {
   const S = HOA.S, c = S.countries[S.player];
   const slots = c.slots + c.mods.slot;
   const year = new Date(S.t).getUTCFullYear();
-  let h = `<div class="slots">`;
+  const slotEls = [];
   for (let i = 0; i < slots; i++) {
     const r = c.research[i];
-    if (r) { const t = HOA.TECH_BY_ID[r.id]; h += `<div class="slot"><b>${esc(t.name)}</b>${HOA.bar(r.prog / (r.cost || t.cost), 'blue')}<small>${Math.round(r.prog)} / ${Math.round(r.cost || t.cost)} dní</small><button class="x" data-act="cancelResearch" data-arg="${r.id}" title="Zrušit">✕</button></div>`; }
-    else h += `<div class="slot empty">Volný výzkumný slot</div>`;
+    if (r) {
+      const t = HOA.TECH_BY_ID[r.id];
+      slotEls.push(html`<div key=${'s' + i} class="slot"><b>${t.name}</b><${Bar} v=${r.prog / (r.cost || t.cost)} cls="blue" /><small>${Math.round(r.prog)} / ${Math.round(r.cost || t.cost)} dní</small><button class="x" title="Zrušit" onClick=${on('cancelResearch', r.id)} title="Zavřít"><${Icon} n="x" /></button></div>`);
+    } else slotEls.push(html`<div key=${'s' + i} class="slot empty">Volný výzkumný slot</div>`);
   }
-  h += `</div>`;
-  for (const cat in HOA.TECH_CATS) {
-    h += `<h3>${HOA.TECH_CATS[cat]}</h3><div class="techs">`;
-    for (const t of HOA.TECHS.filter((x) => x.cat === cat)) {
+  return html`<div class="slots">${slotEls}</div>
+    ${Object.keys(HOA.TECH_CATS).map((cat) => html`<div key=${cat}><h3>${HOA.TECH_CATS[cat]}</h3><div class="techs">${HOA.TECHS.filter((x) => x.cat === cat).map((t) => {
       const done = c.techs.includes(t.id);
       const active = c.research.some((r) => r.id === t.id);
       const avail = !done && !active && (!t.req || t.req.every((r) => c.techs.includes(r))) && (cat !== 'nuc' || c.nukes > 0 || t.id === 'nuc4');
       const ahead = Math.max(0, t.year - year);
-      const desc = HOA.describeBonus(t.eff).join('<br>');
-      h += `<div class="tech ${done ? 'done' : active ? 'active' : avail ? 'avail' : 'locked'}" ${avail ? `data-act="research" data-arg="${t.id}"` : ''} title="${esc(desc.replace(/<br>/g, '\n'))}">
-        <b>${esc(t.name)}</b><small>${t.year}${ahead ? ` • předstih ${ahead} r.` : ''} • ${t.cost} dní</small><div class="eff">${desc}</div></div>`;
-    }
-    h += `</div>`;
-  }
-  return h;
-};
+      const desc = HOA.describeBonus(t.eff);
+      return html`<div key=${t.id} class="tech ${done ? 'done' : active ? 'active' : avail ? 'avail' : 'locked'}" onClick=${avail ? on('research', t.id) : null} title=${desc.join('\n')}>
+        <b>${t.name}</b><small>${t.year}${ahead ? ` • předstih ${ahead} r.` : ''} • ${t.cost} dní</small><div class="eff"><${Lines} list=${desc} /></div></div>`;
+    })}</div></div>`)}`;
+}
 
-HOA.panel_production = function () {
+function ProductionPanel() {
   const S = HOA.S, c = S.countries[S.player];
   const econ = HOA.lawOpt('economy', c.laws.economy);
   const milEff = c.mil * (1 + econ.mil);
-  let h = `<div class="muted">Vojenské továrny: <b>${c.mil}</b> (efektivně ${milEff.toFixed(1)}) • rozdělte výrobu mezi typy výbavy.</div><div class="prod">`;
-  for (const k in HOA.EQUIP) {
-    const E = HOA.EQUIP[k];
-    const share = c.prod[k] || 0;
-    const perDay = (milEff * share * (1 + (c.mods.prod[k] || 0) + (c.mods.prod.all || 0))) / E.cost;
-    h += `<div class="prow"><span class="pic">${E.icon}</span><div class="pname">${E.name}<small>sklad: <b>${fmtN(c.eq[k])}</b> • +${perDay.toFixed(1).replace('.', ',')}/den</small></div><input type="range" min="0" max="100" value="${Math.round(share * 100)}" data-prod="${k}"><span class="pv">${Math.round(share * 100)} %</span></div>`;
-  }
-  h += `</div><h3>Výstavba</h3><div class="muted">Civilní továrny: <b>${c.civ}</b> – každá stavba využije až 10 továren.</div>`;
-  h += `<div class="row"><button class="btn" data-act="build" data-arg="civ">+ Civilní továrna</button><button class="btn" data-act="build" data-arg="mil">+ Vojenská továrna</button></div>`;
   const sp = HOA.R.selProv;
-  if (sp >= 0 && S.ctrl[sp] === c.tag) h += `<button class="btn wide" data-act="build" data-arg="fort">+ Opevnění v provincii ${esc(HOA.provName(sp))} (úroveň ${S.fort[sp]})</button>`;
-  else h += `<div class="muted small">Pro stavbu opevnění vyberte na mapě vlastní provincii.</div>`;
-  for (const b of c.build) {
-    const cost = HOA.BUILD[b.type].cost * (b.type === 'fort' ? S.fort[b.p] + 1 : 1);
-    h += `<div class="card"><b>${HOA.BUILD[b.type].name}${b.type === 'fort' ? ' – ' + esc(HOA.provName(b.p)) : ''}</b>${HOA.bar(b.prog / cost, 'gold')}<button class="x" data-act="cancelBuild" data-arg="${c.build.indexOf(b)}">✕</button></div>`;
-  }
-  if (c.deliveries.length) {
-    h += `<h3>Očekávané dodávky</h3>`;
-    for (const d of c.deliveries) h += `<div class="card">${esc(d.name)} – dorazí ${HOA.fmtDate(d.eta)}</div>`;
-  }
-  return h;
-};
+  return html`
+    <div class="muted">Vojenské továrny: <b>${c.mil}</b> (efektivně ${milEff.toFixed(1)}) • rozdělte výrobu mezi typy výbavy.</div>
+    <div class="prod">${Object.keys(HOA.EQUIP).map((k) => {
+      const E = HOA.EQUIP[k];
+      const share = c.prod[k] || 0;
+      const perDay = (milEff * share * (1 + (c.mods.prod[k] || 0) + (c.mods.prod.all || 0))) / E.cost;
+      return html`<div key=${k} class="prow"><span class="pic"><${Icon} n=${k} /></span><div class="pname">${E.name}<small>sklad: <b>${fmtN(c.eq[k])}</b> • +${perDay.toFixed(1).replace('.', ',')}/den</small></div>
+        <input type="range" min="0" max="100" value=${Math.round(share * 100)} onInput=${(e) => { HOA.setProd(k, +e.currentTarget.value / 100); HOA.uiRefresh(); }} /><span class="pv">${Math.round(share * 100)} %</span></div>`;
+    })}</div>
+    <h3>Výstavba</h3><div class="muted">Civilní továrny: <b>${c.civ}</b> – každá stavba využije až 10 továren.</div>
+    <div class="row"><button class="btn" onClick=${on('build', 'civ')}>+ Civilní továrna</button><button class="btn" onClick=${on('build', 'mil')}>+ Vojenská továrna</button></div>
+    ${sp >= 0 && S.ctrl[sp] === c.tag ? html`<button class="btn wide" onClick=${on('build', 'fort')}>+ Opevnění v provincii ${HOA.provName(sp)} (úroveň ${S.fort[sp]})</button>`
+      : html`<div class="muted small">Pro stavbu opevnění vyberte na mapě vlastní provincii.</div>`}
+    ${c.build.map((b, i) => {
+      const cost = HOA.BUILD[b.type].cost * (b.type === 'fort' ? S.fort[b.p] + 1 : 1);
+      return html`<div key=${i} class="card"><b>${HOA.BUILD[b.type].name}${b.type === 'fort' ? ' – ' + HOA.provName(b.p) : ''}</b><${Bar} v=${b.prog / cost} cls="gold" /><button class="x" onClick=${on('cancelBuild', i)} title="Zavřít"><${Icon} n="x" /></button></div>`;
+    })}
+    ${c.deliveries.length ? html`<h3>Očekávané dodávky</h3>${c.deliveries.map((d, i) => html`<div key=${i} class="card">${d.name} – dorazí ${HOA.fmtDate(d.eta)}</div>`)}` : null}`;
+}
 
-HOA.panel_army = function () {
+function ArmyPanel() {
   const S = HOA.S, c = S.countries[S.player];
   const sp = HOA.R.selProv;
   const rally = sp >= 0 && HOA.canEnter(S, c.tag, sp) ? sp : null;
-  let h = `<label class="toggle"><input type="checkbox" ${c.aiArmy ? 'checked' : ''} data-act="toggleAI"> <span>Automatické velení (AI řídí frontu)</span></label>`;
-  h += `<div class="muted small">Ruční rozkazy: levým kliknutím vyberte jednotky (Shift + tažení = výběr oblastí), pravým kliknutím pošlete na cíl. Ručně ovládané jednotky AI 7 dní nepřebírá.</div>`;
-  h += `<div class="row"><button class="btn" data-act="selectAll">Vybrat všechny jednotky</button></div>`;
-  h += `<h3>Odvod nových divizí</h3><div class="muted small">Shromaždiště: ${rally != null ? esc(HOA.provName(rally)) : 'hlavní město'} (vyberte provincii na mapě)</div><table class="units"><tr><th>Typ</th><th>Út.</th><th>Obr.</th><th>Rychl.</th><th>Cena</th><th></th></tr>`;
-  for (const t in HOA.UNITS) {
-    const T = HOA.UNITS[t];
-    const why = HOA.canRecruit(c, t);
-    const cost = Object.entries(T.eq).map(([k, v]) => `${v} ${HOA.EQUIP[k].icon}`).join(' ') + ` • ${T.mp}k 👥`;
-    h += `<tr><td><b>${T.name}</b></td><td>${Math.round(T.att * HOA.unitMod(c, 'att', t))}</td><td>${Math.round(T.def * HOA.unitMod(c, 'def', t))}</td><td>${T.spd}</td><td class="small">${cost}<br>${T.days} dní</td><td><button class="btn sm" ${why ? `disabled title="${esc(why)}"` : ''} data-act="recruit" data-arg="${t}">Odvést</button></td></tr>`;
-  }
-  h += `</table>`;
-  if (c.training.length) {
-    h += `<h3>Ve výcviku (${c.training.length})</h3>`;
-    for (const t of c.training) h += `<div class="card">${HOA.UNITS[t.type].name}${HOA.bar(1 - t.days / t.total, 'green')}<small>${t.days} dní</small></div>`;
-  }
   const mine = S.units.filter((u) => u.tag === c.tag);
   const byType = {};
   mine.forEach((u) => (byType[u.type] = (byType[u.type] || 0) + 1));
-  h += `<h3>Armáda (${mine.length} divizí)</h3><div class="chips">${Object.entries(byType).map(([t, n]) => `<span class="chip">${n}× ${HOA.UNITS[t].name}</span>`).join('')}</div>`;
-  h += `<div class="kv"><span>Ztráty</span><b>${fmtN(c.casualties)}</b></div><div class="kv"><span>Způsobené ztráty</span><b>${fmtN(c.kills)}</b></div>`;
-  return h;
-};
+  return html`
+    <label class="toggle"><input type="checkbox" checked=${!!c.aiArmy} onChange=${on('toggleAI')} /> <span>Automatické velení (AI řídí frontu)</span></label>
+    <div class="muted small">Ruční rozkazy: levým kliknutím vyberte jednotky (Shift + tažení = výběr oblastí), pravým kliknutím pošlete na cíl. Ručně ovládané jednotky AI 7 dní nepřebírá.</div>
+    <div class="row"><button class="btn" onClick=${on('selectAll')}>Vybrat všechny jednotky</button></div>
+    <h3>Odvod nových divizí</h3><div class="muted small">Shromaždiště: ${rally != null ? HOA.provName(rally) : 'hlavní město'} (vyberte provincii na mapě)</div>
+    <table class="units"><tbody><tr><th>Typ</th><th>Út.</th><th>Obr.</th><th>Rychl.</th><th>Cena</th><th></th></tr>
+    ${Object.keys(HOA.UNITS).map((t) => {
+      const T = HOA.UNITS[t];
+      const why = HOA.canRecruit(c, t);
+      const cost = html`${Object.entries(T.eq).map(([k, v]) => html`<span key=${k} class="cost" title=${HOA.EQUIP[k].name}><${Icon} n=${k} />${v}</span>`)}<span class="cost" title="Lidské zdroje (tis.)"><${Icon} n="people" />${T.mp}k</span>`;
+      return html`<tr key=${t}><td><b>${T.name}</b></td><td>${Math.round(T.att * HOA.unitMod(c, 'att', t))}</td><td>${Math.round(T.def * HOA.unitMod(c, 'def', t))}</td><td>${T.spd}</td><td class="small">${cost}<br />${T.days} dní</td><td><button class="btn sm" disabled=${!!why} title=${why || ''} onClick=${on('recruit', t)}>Odvést</button></td></tr>`;
+    })}</tbody></table>
+    ${c.training.length ? html`<h3>Ve výcviku (${c.training.length})</h3>${c.training.map((t, i) => html`<div key=${i} class="card">${HOA.UNITS[t.type].name}<${Bar} v=${1 - t.days / t.total} cls="green" /><small>${t.days} dní</small></div>`)}` : null}
+    <h3>Armáda (${mine.length} divizí)</h3><div class="chips">${Object.entries(byType).map(([t, n]) => html`<span key=${t} class="chip">${n}× ${HOA.UNITS[t].name}</span>`)}</div>
+    <div class="kv"><span>Ztráty</span><b>${fmtN(c.casualties)}</b></div><div class="kv"><span>Způsobené ztráty</span><b>${fmtN(c.kills)}</b></div>`;
+}
 
-HOA.panel_diplomacy = function () {
-  const S = HOA.S;
-  let h = `<input id="dipSearch" placeholder="Hledat stát…" autocomplete="off"><div class="diplist">`;
+function DiplomacyPanel() {
+  const S = HOA.S, UI = HOA.UI;
+  const q = UI.dipQuery.toLowerCase();
   const tags = Object.keys(S.countries).filter((t) => S.countries[t].alive && t !== S.player);
   tags.sort((a, b) => (S.countries[b].detailed - S.countries[a].detailed) || S.countries[b].gdp - S.countries[a].gdp);
-  for (const t of tags) {
-    const c = S.countries[t];
-    const r = HOA.getRel(S, S.player, t);
-    const war = HOA.atWar(S, S.player, t);
-    h += `<div class="dip" data-act="showCountry" data-arg="${t}" data-name="${esc(c.name.toLowerCase())}"><img class="flag" src="${HOA.flagURL(t, 30, 20)}"><span>${esc(c.name)}</span>${war ? '<em class="war">VÁLKA</em>' : ''}<b class="${r >= 0 ? 'pos' : 'neg'}">${r > 0 ? '+' : ''}${Math.round(r)}</b></div>`;
-  }
-  return h + '</div>';
-};
-HOA.filterDip = function () {
-  const q = ($('#dipSearch').value || '').toLowerCase();
-  document.querySelectorAll('.dip').forEach((d) => (d.style.display = d.dataset.name.includes(q) ? '' : 'none'));
-};
+  return html`<input id="dipSearch" placeholder="Hledat stát…" autocomplete="off" value=${UI.dipQuery} onInput=${(e) => { UI.dipQuery = e.currentTarget.value; HOA.uiRefresh(); }} />
+    <div class="diplist">${tags.filter((t) => S.countries[t].name.toLowerCase().includes(q)).map((t) => {
+      const c = S.countries[t];
+      const r = HOA.getRel(S, S.player, t);
+      return html`<div key=${t} class="dip" onClick=${on('showCountry', t)}><${Flag} tag=${t} w=${30} h=${20} /><span>${c.name}</span>${HOA.atWar(S, S.player, t) ? html`<em class="war">VÁLKA</em>` : null}<b class=${r >= 0 ? 'pos' : 'neg'}>${r > 0 ? '+' : ''}${Math.round(r)}</b></div>`;
+    })}</div>`;
+}
 
-HOA.panel_market = function () {
+function MarketPanel() {
   const S = HOA.S, c = S.countries[S.player];
-  let h = `<div class="muted">Pokladna: <b>${money(c.money)}</b>. Prodávající musí mít s vámi dobré vztahy nebo být ve stejné alianci.</div>`;
-  const sellers = [...new Set(HOA.MARKET.map((m) => m.seller))];
-  for (const s of sellers) {
-    const sc = S.countries[s];
-    if (!sc) continue;
-    const ok = HOA.sellerWilling(S, s, S.player);
-    h += `<h3><img class="flag" src="${HOA.flagURL(s, 24, 16)}"> ${esc(sc.name)} ${ok ? '' : '<em class="neg">neprodává</em>'}</h3><div class="market">`;
-    for (const m of HOA.MARKET.filter((x) => x.seller === s)) {
-      const can = ok && c.money >= m.price && s !== S.player;
-      const eff = Object.entries(m.eq).map(([k, v]) => `+${v} ${HOA.EQUIP[k].short}`).concat(HOA.describeBonus(m.bonus).map((x) => x.replace(/\+(\d+)/, (a, n) => '+' + Math.round(n / 2)))).join(', ');
-      h += `<div class="mitem"><div><b>${esc(m.name)}</b><small>${esc(m.desc)}</small><small class="eff">${eff} • ${m.days} dní</small></div><button class="btn sm" ${can ? '' : 'disabled'} data-act="buy" data-arg="${m.id}">${money(m.price)}</button></div>`;
-    }
-    h += `</div>`;
-  }
-  return h;
-};
+  const sellers = [...new Set(HOA.MARKET.map((m) => m.seller))].filter((s) => S.countries[s]);
+  return html`<div class="muted">Pokladna: <b>${money(c.money)}</b>. Prodávající musí mít s vámi dobré vztahy nebo být ve stejné alianci.</div>
+    ${sellers.map((s) => {
+      const ok = HOA.sellerWilling(S, s, S.player);
+      return html`<div key=${s}><h3><${Flag} tag=${s} w=${24} h=${16} /> ${S.countries[s].name} ${ok ? '' : html`<em class="neg">neprodává</em>`}</h3><div class="market">
+        ${HOA.MARKET.filter((x) => x.seller === s).map((m) => {
+          const can = ok && c.money >= m.price && s !== S.player;
+          const eff = Object.entries(m.eq).map(([k, v]) => `+${v} ${HOA.EQUIP[k].short}`).concat(HOA.describeBonus(m.bonus).map((x) => x.replace(/\+(\d+)/, (a, n) => '+' + Math.round(n / 2)))).join(', ');
+          return html`<div key=${m.id} class="mitem"><div><b>${m.name}</b><small>${m.desc}</small><small class="eff">${eff} • ${m.days} dní</small></div><button class="btn sm" disabled=${!can} onClick=${on('buy', m.id)}>${money(m.price)}</button></div>`;
+        })}</div></div>`;
+    })}`;
+}
 
-HOA.panel_wars = function () {
+function WarsPanel() {
   const S = HOA.S, W = HOA.W;
-  if (!S.wars.length) return '<div class="muted">Svět je v míru… zatím.</div>';
-  let h = '';
-  for (const w of S.wars) {
-    const side = (list) => list.map((t) => `<span class="chip"><img class="flag" src="${HOA.flagURL(t, 18, 12)}"> ${esc(S.countries[t].name)}</span>`).join('');
-    const days = Math.round((S.t - w.start) / 86400e3);
-    h += `<div class="card war"><b>${esc(w.name)}</b> <small class="muted">${days} dní</small>
-      <div class="sides"><div>${side(w.att)}</div><div class="vs">vs.</div><div>${side(w.def)}</div></div>
-      <div class="kv"><span>Kapitulace ${esc(S.countries[w.leaderA].name)}</span>${HOA.bar(HOA.surrenderProgress(S, W, w.leaderA), 'red')}</div>
-      <div class="kv"><span>Kapitulace ${esc(S.countries[w.leaderD].name)}</span>${HOA.bar(HOA.surrenderProgress(S, W, w.leaderD), 'red')}</div></div>`;
-  }
-  return h;
-};
+  if (!S.wars.length) return html`<div class="muted">Svět je v míru… zatím.</div>`;
+  const side = (list) => list.map((t) => html`<span key=${t} class="chip"><${Flag} tag=${t} w=${18} h=${12} /> ${S.countries[t].name}</span>`);
+  return S.wars.map((w, i) => html`<div key=${i} class="card war"><b>${w.name}</b> <small class="muted">${Math.round((S.t - w.start) / 86400e3)} dní</small>
+    <div class="sides"><div>${side(w.att)}</div><div class="vs">vs.</div><div>${side(w.def)}</div></div>
+    <div class="kv"><span>Kapitulace ${S.countries[w.leaderA].name}</span><${Bar} v=${HOA.surrenderProgress(S, W, w.leaderA)} cls="red" /></div>
+    <div class="kv"><span>Kapitulace ${S.countries[w.leaderD].name}</span><${Bar} v=${HOA.surrenderProgress(S, W, w.leaderD)} cls="red" /></div></div>`);
+}
 
-HOA.panel_news = function () {
+function NewsPanel() {
   const S = HOA.S;
-  return S.news.map((n) => `<div class="news ${n.kind}"><small>${HOA.fmtDate(n.t)}</small> ${esc(n.text)}</div>`).join('') || '<div class="muted">Žádné zprávy.</div>';
-};
+  if (!S.news.length) return html`<div class="muted">Žádné zprávy.</div>`;
+  return S.news.map((n, i) => html`<div key=${i} class="news ${n.kind}"><small>${HOA.fmtDate(n.t)}</small> ${n.text}</div>`);
+}
 
 // ---------- country / leader view (right-click on a country) ----------
 HOA.openCountryView = function (tag) {
   if (!HOA.S.countries[tag]) return;
   HOA.UI.countryTag = tag;
   HOA.UI.panel = 'country';
-  document.querySelectorAll('#leftbar button').forEach((b) => b.classList.remove('on'));
-  HOA.renderPanel();
+  HOA.uiRefresh();
 };
 
 HOA._leaderPromise = {};
 HOA._leaderData = {};
-// Portrait + short bio from Wikipedia (Czech first, English fallback). Cached in memory and localStorage.
+// Portrait + short bio from Wikipedia (Czech first, English fallback). Cached in memory and IndexedDB.
 HOA.leaderInfo = function (name) {
   if (HOA._leaderPromise[name]) return HOA._leaderPromise[name];
-  let stored = null;
-  try { stored = JSON.parse(localStorage.getItem('hoa_leader:' + name) || 'null'); } catch (e) { stored = null; }
-  if (stored) { HOA._leaderData[name] = stored; return (HOA._leaderPromise[name] = Promise.resolve(stored)); }
   const summary = async (lang, title) => {
     const r = await fetch(`https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`);
     if (!r.ok) return null;
@@ -369,17 +427,20 @@ HOA.leaderInfo = function (name) {
     return d.query && d.query.search[0] ? d.query.search[0].title : null;
   };
   const p = (async () => {
+    let stored = null;
+    try { stored = await IDB.get('hoa_leader:' + name); } catch (e) { stored = null; }
+    if (stored) return (HOA._leaderData[name] = stored);
     let d = await summary('cs', name);
     if (!d || !d.thumbnail) { const t = await search('cs', name + ' politik'); const d2 = t && (await summary('cs', t)); if (d2 && (d2.thumbnail || !d)) d = d2; }
     if (!d || !d.thumbnail) { const t = await search('en', name); const d2 = t && (await summary('en', t)); if (d2 && (d2.thumbnail || !d)) d = d2; }
     const info = d ? { img: d.thumbnail ? d.thumbnail.source : null, text: d.extract || '', desc: d.description || '', url: d.content_urls && d.content_urls.desktop ? d.content_urls.desktop.page : null } : { img: null, text: '' };
-    try { localStorage.setItem('hoa_leader:' + name, JSON.stringify(info)); } catch (e) { /* storage full or blocked */ }
-    HOA._leaderData[name] = info;
-    return info;
+    try { await IDB.set('hoa_leader:' + name, info); } catch (e) { /* storage blocked */ }
+    return (HOA._leaderData[name] = info);
   })().catch(() => {
     delete HOA._leaderPromise[name];
-    return { img: null, text: '', offline: true };
+    return (HOA._leaderData[name] = { img: null, text: '', offline: true });
   });
+  p.then(() => HOA.uiRefresh());
   return (HOA._leaderPromise[name] = p);
 };
 
@@ -400,55 +461,51 @@ HOA.partySupport = function (c) {
   return out;
 };
 
-HOA.panel_country = function () {
-  const S = HOA.S, W = HOA.W;
+function Bio({ inf }) {
+  if (inf.offline) return html`<span class="muted">Wikipedie není dostupná (offline).</span>`;
+  if (!inf.text) return html`<span class="muted">Informace nenalezeny.</span>`;
+  const t = inf.text.length > 650 ? inf.text.slice(0, 650).replace(/\s+\S*$/, '') + '…' : inf.text;
+  return html`<p>${t}</p>${inf.url ? html`<a href=${inf.url} target="_blank" rel="noopener">Více na Wikipedii ›</a>` : null}`;
+}
+
+function CountryPanel() {
+  const S = HOA.S;
   const tag = HOA.UI.countryTag;
   const c = S.countries[tag];
-  if (!c) return '';
+  if (!c) return null;
   const name = c.leader;
   const real = name && name !== '—' && !/předsednictvo/i.test(name);
   const info = real ? HOA._leaderData[name] : null;
-  if (real && !info) HOA.leaderInfo(name).then((inf) => {
-    if (HOA.UI.panel !== 'country' || HOA.UI.countryTag !== tag) return;
-    const img = document.getElementById('cvImg');
-    if (img && inf.img) img.src = inf.img;
-    const bio = document.getElementById('cvBio');
-    if (bio) bio.innerHTML = HOA.bioHtml(inf);
-  });
+  if (real && !info) HOA.leaderInfo(name);
   const sup = HOA.partySupport(c);
   let acc = 0;
   const grad = sup.map(([id, v]) => { const a = acc; acc += v; return `${HOA.IDEOLOGIES[id].color} ${a}% ${acc}%`; }).join(',');
   const fac = c.faction && S.factions[c.faction];
-  let h = `<div class="cv-top">
-    <div class="portrait"><img id="cvImg" src="${info && info.img ? esc(info.img) : HOA.SILHOUETTE}" alt=""><div class="pname">${esc(name || '—')}</div></div>
-    <div class="cv-info">
-      <div class="cv-country"><img class="flag" src="${HOA.flagURL(tag, 48, 32)}"><b>${esc(c.name)}</b></div>
-      <div class="cv-row"><span>Vláda</span><b>${esc(c.gov)}</b></div>
-      <div class="cv-row"><span>Ideologie</span><b style="color:${HOA.IDEOLOGIES[c.ideo].color}">${HOA.IDEOLOGIES[c.ideo].name}</b></div>
-      <div class="cv-row"><span>Aliance</span><b>${fac ? esc(fac.name) : '—'}</b></div>
-      <div class="cv-pie"><div class="pie" style="background:conic-gradient(${grad})"></div><div class="legend">${sup.map(([id, v]) => `<div><i style="background:${HOA.IDEOLOGIES[id].color}"></i>${HOA.IDEOLOGIES[id].name} <b>${v} %</b></div>`).join('')}</div></div>
-    </div></div>`;
-  // national spirits
   const spirits = [];
-  for (const t of (c.tmods || []).filter((t) => t.until > S.t)) spirits.push([t.att > 0 || t.def > 0 ? '⬆' : '⬇', t.name, (t.desc || '') + ` (do ${HOA.fmtDate(t.until)})`]);
-  spirits.push(['🏭', HOA.lawOpt('economy', c.laws.economy).name, HOA.lawOpt('economy', c.laws.economy).desc]);
-  spirits.push(['🎖', HOA.lawOpt('conscription', c.laws.conscription).name, HOA.lawOpt('conscription', c.laws.conscription).desc]);
-  if (c.sanctions.length) spirits.push(['⛔', 'Mezinárodní sankce', `${c.sanctions.length} států, HDP −${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} %`]);
-  if (c.nukes) spirits.push(['☢', 'Jaderná mocnost', `${c.nukes} hlavic`]);
-  if (c.atWar) spirits.push(['⚔', 'Ve válce', HOA.enemiesOf(S, tag).map((t) => S.countries[t].name).join(', ')]);
-  if (c.focus.cur) { const f = HOA.focusTreeFor(tag).find((x) => x.id === c.focus.cur); if (f) spirits.push(['★', 'Národní cíl: ' + f.name, f.desc]); }
-  h += `<h3>Národní duch</h3><div class="spirits">${spirits.map(([i, n, d]) => `<div class="spirit" title="${esc(d)}"><span>${i}</span>${esc(n)}</div>`).join('')}</div>`;
-  h += `<h3>O vůdci</h3><div id="cvBio" class="bio">${real ? (info ? HOA.bioHtml(info) : '<span class="muted">Načítám z Wikipedie…</span>') : '<span class="muted">Bez podrobností.</span>'}</div>`;
+  for (const t of (c.tmods || []).filter((t) => t.until > S.t)) spirits.push([t.att > 0 || t.def > 0 ? 'up' : 'down', t.name, (t.desc || '') + ` (do ${HOA.fmtDate(t.until)})`]);
+  spirits.push(['factory', HOA.lawOpt('economy', c.laws.economy).name, HOA.lawOpt('economy', c.laws.economy).desc]);
+  spirits.push(['shield', HOA.lawOpt('conscription', c.laws.conscription).name, HOA.lawOpt('conscription', c.laws.conscription).desc]);
+  if (c.sanctions.length) spirits.push(['ban', 'Mezinárodní sankce', `${c.sanctions.length} států, HDP −${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} %`]);
+  if (c.nukes) spirits.push(['nuke', 'Jaderná mocnost', `${c.nukes} hlavic`]);
+  if (c.atWar) spirits.push(['swords', 'Ve válce', HOA.enemiesOf(S, tag).map((t) => S.countries[t].name).join(', ')]);
+  if (c.focus.cur) { const f = HOA.focusTreeFor(tag).find((x) => x.id === c.focus.cur); if (f) spirits.push(['star', 'Národní cíl: ' + f.name, f.desc]); }
   const prov = S.owner.reduce((n, o) => n + (o === tag ? 1 : 0), 0);
-  h += `<h3>Stát</h3><div class="kv"><span>Provincie</span><b>${prov}</b></div><div class="kv"><span>Ztráty ve válkách</span><b>${fmtN(c.casualties)}</b></div>`;
-  return h + HOA.side_country(tag, true);
-};
-HOA.bioHtml = function (inf) {
-  if (inf.offline) return '<span class="muted">Wikipedie není dostupná (offline).</span>';
-  if (!inf.text) return '<span class="muted">Informace nenalezeny.</span>';
-  const t = inf.text.length > 650 ? inf.text.slice(0, 650).replace(/\s+\S*$/, '') + '…' : inf.text;
-  return `<p>${esc(t)}</p>${inf.url ? `<a href="${esc(inf.url)}" target="_blank" rel="noopener">Více na Wikipedii ›</a>` : ''}`;
-};
+  return html`<div class="cv-top">
+      <div class="portrait"><img src=${info && info.img ? info.img : HOA.SILHOUETTE} alt="" /><div class="pname">${name || '—'}</div></div>
+      <div class="cv-info">
+        <div class="cv-country"><${Flag} tag=${tag} w=${48} h=${32} /><b>${c.name}</b></div>
+        <div class="cv-row"><span>Vláda</span><b>${c.gov}</b></div>
+        <div class="cv-row"><span>Ideologie</span><b style=${{ color: HOA.IDEOLOGIES[c.ideo].color }}>${HOA.IDEOLOGIES[c.ideo].name}</b></div>
+        <div class="cv-row"><span>Aliance</span><b>${fac ? fac.name : '—'}</b></div>
+        <div class="cv-pie"><div class="pie" style=${{ background: `conic-gradient(${grad})` }}></div><div class="legend">${sup.map(([id, v]) => html`<div key=${id}><i style=${{ background: HOA.IDEOLOGIES[id].color }}></i>${HOA.IDEOLOGIES[id].name} <b>${v} %</b></div>`)}</div></div>
+      </div></div>
+    <h3>Národní duch</h3><div class="spirits">${spirits.map(([i, n, d], k) => html`<div key=${k} class="spirit" title=${d}><span><${Icon} n=${i} /></span>${n}</div>`)}</div>
+    <h3>O vůdci</h3><div class="bio">${real ? (info ? html`<${Bio} inf=${info} />` : html`<span class="muted">Načítám z Wikipedie…</span>`) : html`<span class="muted">Bez podrobností.</span>`}</div>
+    <h3>Stát</h3><div class="kv"><span>Provincie</span><b>${prov}</b></div><div class="kv"><span>Ztráty ve válkách</span><b>${fmtN(c.casualties)}</b></div>
+    <${CountryInfo} tag=${tag} noHeader=${true} />`;
+}
+
+const PANEL_BODY = { politics: PoliticsPanel, research: ResearchPanel, production: ProductionPanel, army: ArmyPanel, diplomacy: DiplomacyPanel, market: MarketPanel, wars: WarsPanel, news: NewsPanel, country: CountryPanel };
 
 HOA.provName = function (p) {
   const pr = HOA.W.provinces[p];
@@ -458,43 +515,34 @@ HOA.provName = function (p) {
 // ---------- side panel ----------
 HOA.showSide = function (side) {
   HOA.UI.side = side;
-  HOA.renderSide();
-};
-HOA.renderSide = function () {
-  const el = $('#side');
-  const sd = HOA.UI.side;
-  const S = HOA.S;
-  if (HOA.R.selected.size) {
-    el.classList.remove('hidden');
-    el.innerHTML = HOA.side_units();
-    return;
-  }
-  if (!sd) { el.classList.add('hidden'); return; }
-  el.classList.remove('hidden');
-  let h = '';
-  if (sd.p != null && sd.p >= 0) h += HOA.side_province(sd.p);
-  if (sd.tag && S.countries[sd.tag]) h += HOA.side_country(sd.tag);
-  el.innerHTML = `<button class="x close" data-act="closeSide">✕</button>` + h;
+  HOA.uiRefresh();
 };
 
-HOA.side_units = function () {
-  const S = HOA.S;
-  const units = S.units.filter((u) => HOA.R.selected.has(u.id));
-  if (!units.length) { HOA.R.selected.clear(); return ''; }
-  let h = `<button class="x close" data-act="deselect">✕</button><h2>Vybrané jednotky (${units.length})</h2>`;
-  h += `<div class="row"><button class="btn sm" data-act="stopUnits">Zastavit</button><button class="btn sm danger" data-act="disband">Rozpustit</button></div><div class="ulist">`;
-  for (const u of units.slice(0, 60)) {
-    const T = HOA.UNITS[u.type];
-    const mo = HOA.maxOrg(S, u);
-    const st = u.tr ? 'přesun' : u.inBattle ? 'v boji' : u.path.length ? 'na pochodu' : 'v pohotovosti';
-    h += `<div class="unit"><img class="usym" src="${HOA.symURL(u.type, S.countries[u.tag].color)}"><div class="un"><b>${esc(u.name)}</b><small>${esc(HOA.provName(u.p))} • ${st}</small>
-      <div class="ub"><span>Org</span>${HOA.bar(u.org / mo, 'green')}</div><div class="ub"><span>Síla</span>${HOA.bar(u.str, 'gold')}</div></div></div>`;
+function Side() {
+  const S = HOA.S, sd = HOA.UI.side;
+  if (HOA.R.selected.size) {
+    const units = S.units.filter((u) => HOA.R.selected.has(u.id));
+    if (units.length) return html`<div id="side"><${SideUnits} units=${units} /></div>`;
+    HOA.R.selected.clear();
   }
-  h += '</div>';
-  if (units.length > 60) h += `<div class="muted">… a dalších ${units.length - 60}</div>`;
-  h += `<div class="muted small">Pravé tlačítko na mapě = přesun / útok.</div>`;
-  return h;
-};
+  if (!sd) return html`<div id="side" class="hidden"></div>`;
+  return html`<div id="side"><button class="x close" onClick=${on('closeSide')} title="Zavřít"><${Icon} n="x" /></button>
+    ${sd.p != null && sd.p >= 0 ? html`<${SideProvince} p=${sd.p} />` : null}
+    ${sd.tag && S.countries[sd.tag] ? html`<${CountryInfo} tag=${sd.tag} />` : null}</div>`;
+}
+
+function SideUnits({ units }) {
+  const S = HOA.S;
+  return html`<button class="x close" onClick=${on('deselect')} title="Zavřít"><${Icon} n="x" /></button><h2>Vybrané jednotky (${units.length})</h2>
+    <div class="row"><button class="btn sm" onClick=${on('stopUnits')}>Zastavit</button><button class="btn sm danger" onClick=${on('disband')}>Rozpustit</button></div>
+    <div class="ulist">${units.slice(0, 60).map((u) => {
+      const st = u.tr ? 'přesun' : u.inBattle ? 'v boji' : u.path.length ? 'na pochodu' : 'v pohotovosti';
+      return html`<div key=${u.id} class="unit"><img class="usym" src=${HOA.symURL(u.type, S.countries[u.tag].color)} /><div class="un"><b>${u.name}</b><small>${HOA.provName(u.p)} • ${st}</small>
+        <div class="ub"><span>Org</span><${Bar} v=${u.org / HOA.maxOrg(S, u)} cls="green" /></div><div class="ub"><span>Síla</span><${Bar} v=${u.str} cls="gold" /></div></div></div>`;
+    })}</div>
+    ${units.length > 60 ? html`<div class="muted">… a dalších ${units.length - 60}</div>` : null}
+    <div class="muted small">Pravé tlačítko na mapě = přesun / útok.</div>`;
+}
 
 HOA._symCache = {};
 HOA.symURL = function (type, color) {
@@ -509,102 +557,96 @@ HOA.symURL = function (type, color) {
   return (HOA._symCache[k] = c.toDataURL());
 };
 
-HOA.side_province = function (p) {
+function SideProvince({ p }) {
   const S = HOA.S, W = HOA.W;
   const pr = W.provinces[p];
   const o = S.owner[p], ct = S.ctrl[p];
-  let h = `<h2>${esc(HOA.provName(p))}</h2><div class="kv"><span>Vlastník</span><b>${o ? esc(S.countries[o].name) : '—'}</b></div>`;
-  if (ct !== o) h += `<div class="kv warn"><span>Okupant</span><b>${esc(S.countries[ct].name)}</b></div>`;
-  h += `<div class="kv"><span>Body vítězství</span><b>${pr.vp}</b></div><div class="kv"><span>Opevnění</span><b>${'■'.repeat(S.fort[p])}${'□'.repeat(5 - S.fort[p])}</b></div>`;
-  if (S.rad[p] > 0) h += `<div class="kv warn"><span>Radiace</span><b>${S.rad[p]} dní</b></div>`;
   const here = S.units.filter((u) => u.p === p && !u.tr);
-  if (here.length) h += `<div class="muted small">Jednotky: ${[...new Set(here.map((u) => u.tag))].map((t) => `${here.filter((u) => u.tag === t).length}× ${esc(S.countries[t].name)}`).join(', ')}</div>`;
   const pl = S.player;
-  if (pl) {
-    const row = [];
-    if (ct === pl) row.push(`<button class="btn sm" data-act="build" data-arg="fort">Opevnit</button>`);
-    if (ct && HOA.atWar(S, pl, ct) && S.countries[pl].nukes > 0) {
-      const why = HOA.canNuke(S, pl, p);
-      row.push(`<button class="btn sm danger" ${why ? `disabled title="${esc(why)}"` : ''} data-act="nuke" data-arg="${p}">☢ Jaderný úder</button>`);
-    }
-    if (row.length) h += `<div class="row">${row.join('')}</div>`;
+  const row = [];
+  if (pl && ct === pl) row.push(html`<button key="fort" class="btn sm" onClick=${on('build', 'fort')}>Opevnit</button>`);
+  if (pl && ct && HOA.atWar(S, pl, ct) && S.countries[pl].nukes > 0) {
+    const why = HOA.canNuke(S, pl, p);
+    row.push(html`<button key="nuke" class="btn sm danger" disabled=${!!why} title=${why || ''} onClick=${on('nuke', p)}><${Icon} n="nuke" />Jaderný úder</button>`);
   }
-  return h + '<hr>';
-};
+  return html`<h2>${HOA.provName(p)}</h2><div class="kv"><span>Vlastník</span><b>${o ? S.countries[o].name : '—'}</b></div>
+    ${ct !== o ? html`<div class="kv warn"><span>Okupant</span><b>${S.countries[ct].name}</b></div>` : null}
+    <div class="kv"><span>Body vítězství</span><b>${pr.vp}</b></div><div class="kv"><span>Opevnění</span><b class="pips">${[0, 1, 2, 3, 4].map((i) => html`<i key=${i} class=${i < S.fort[p] ? 'on' : ''}></i>`)}</b></div>
+    ${S.rad[p] > 0 ? html`<div class="kv warn"><span>Radiace</span><b>${S.rad[p]} dní</b></div>` : null}
+    ${here.length ? html`<div class="muted small">Jednotky: ${[...new Set(here.map((u) => u.tag))].map((t) => `${here.filter((u) => u.tag === t).length}× ${S.countries[t].name}`).join(', ')}</div>` : null}
+    ${row.length ? html`<div class="row">${row}</div>` : null}<hr />`;
+}
 
-HOA.side_country = function (tag, noHeader) {
-  const S = HOA.S, W = HOA.W, pl = S.player;
+function CountryInfo({ tag, noHeader }) {
+  const S = HOA.S, pl = S.player;
   const c = S.countries[tag];
   const P = S.countries[pl];
-  const rel = HOA.getRel(S, pl, tag);
   const units = S.units.filter((u) => u.tag === tag).length;
-  let h = noHeader ? '' : `<div class="leader"><img class="flag big" src="${HOA.flagURL(tag, 72, 48)}"><div><h2>${esc(c.name)}</h2><b>${esc(c.leader)}</b><div class="muted">${esc(c.gov)}</div><div class="muted">${HOA.IDEOLOGIES[c.ideo].name}${c.faction && S.factions[c.faction] ? ' • ' + esc(S.factions[c.faction].name) : ''}</div><button class="linkbtn" data-act="countryView" data-arg="${tag}">Detail státu a vůdce ›</button></div></div>`;
-  h += `<div class="grid2"><div>HDP<b>${money(c.gdp)}</b></div><div>Populace<b>${c.pop} mil.</b></div><div>Divize<b>${units}</b></div><div>Továrny<b>${c.civ}/${c.mil}</b></div><div>Stabilita<b>${pct(c.stab)}</b></div><div>Vál. podpora<b>${pct(c.ws)}</b></div></div>`;
-  if (c.nukes) h += `<div class="kv"><span>Jaderné hlavice</span><b>☢ ${c.nukes}</b></div>`;
-  if (!pl) return h + (c.alive ? `<button class="btn gold wide" data-act="choose" data-arg="${tag}">Hrát za stát ${esc(c.name)}</button>` : '');
-  if (tag === pl) return h;
+  const head = noHeader ? null : html`<div class="leader"><${Flag} tag=${tag} w=${72} h=${48} cls="big" /><div><h2>${c.name}</h2><b>${c.leader}</b><div class="muted">${c.gov}</div><div class="muted">${HOA.IDEOLOGIES[c.ideo].name}${c.faction && S.factions[c.faction] ? ' • ' + S.factions[c.faction].name : ''}</div><button class="linkbtn" onClick=${on('countryView', tag)}>Detail státu a vůdce ›</button></div></div>`;
+  const grid = html`<div class="grid2"><div>HDP<b>${money(c.gdp)}</b></div><div>Populace<b>${c.pop} mil.</b></div><div>Divize<b>${units}</b></div><div>Továrny<b>${c.civ}/${c.mil}</b></div><div>Stabilita<b>${pct(c.stab)}</b></div><div>Vál. podpora<b>${pct(c.ws)}</b></div></div>
+    ${c.nukes ? html`<div class="kv"><span>Jaderné hlavice</span><b><${Icon} n="nuke" /> ${c.nukes}</b></div>` : null}`;
+  if (!pl) return html`${head}${grid}${c.alive ? html`<button class="btn gold wide" onClick=${on('choose', tag)}>Hrát za stát ${c.name}</button>` : null}`;
+  if (tag === pl) return html`${head}${grid}`;
+  const rel = HOA.getRel(S, pl, tag);
   const war = HOA.atWar(S, pl, tag);
-  h += `<div class="kv"><span>Vztahy s vámi</span><b class="${rel >= 0 ? 'pos' : 'neg'}">${rel > 0 ? '+' : ''}${Math.round(rel)}</b></div>`;
   const flags = [];
-  if (war) flags.push('<em class="war">VE VÁLCE</em>');
-  if (HOA.allies(S, pl, tag) && !war) flags.push('<em class="pos">spojenec</em>');
-  if (c.access.includes(pl)) flags.push('<em>vojenský přístup</em>');
-  if (P.guarantees.includes(tag)) flags.push('<em>garantováno</em>');
-  if (c.sanctions.includes(pl)) flags.push('<em class="neg">sankce</em>');
-  if (P.wargoals.includes(tag)) flags.push('<em class="neg">válečný cíl</em>');
-  if (P.justifying && P.justifying.target === tag) flags.push(`<em>ospravedlňování ${P.justifying.days} d</em>`);
-  if (flags.length) h += `<div class="chips">${flags.join(' ')}</div>`;
-  if (!c.alive) return h;
-  const B = (act, label, cost, dis, cls) => `<button class="btn sm ${cls || ''}" data-act="dip" data-arg="${act}|${tag}" ${dis ? `disabled title="${esc(dis)}"` : ''}>${label}${cost ? ` <small>${cost}</small>` : ''}</button>`;
-  h += `<h3>Diplomacie</h3><div class="dipbtns">`;
+  if (war) flags.push(html`<em class="war">VE VÁLCE</em>`);
+  if (HOA.allies(S, pl, tag) && !war) flags.push(html`<em class="pos">spojenec</em>`);
+  if (c.access.includes(pl)) flags.push(html`<em>vojenský přístup</em>`);
+  if (P.guarantees.includes(tag)) flags.push(html`<em>garantováno</em>`);
+  if (c.sanctions.includes(pl)) flags.push(html`<em class="neg">sankce</em>`);
+  if (P.wargoals.includes(tag)) flags.push(html`<em class="neg">válečný cíl</em>`);
+  if (P.justifying && P.justifying.target === tag) flags.push(html`<em>ospravedlňování ${P.justifying.days} d</em>`);
+  const B = (act, label, cost, dis, cls) => html`<button key=${act} class="btn sm ${cls || ''}" disabled=${!!dis} title=${dis || ''} onClick=${on('dip', act + '|' + tag)}>${label}${cost ? html` <small>${cost}</small>` : null}</button>`;
   const pp = (n) => (P.pp < n ? 'Nedostatek politické moci' : null);
+  const btns = [];
   if (!war) {
-    h += B('improve', 'Zlepšit vztahy', '25 PM', pp(25) || HOA.cooldown(P, tag, 'improve'));
-    h += B('access', 'Požádat o vojenský přístup', '25 PM', pp(25) || (c.access.includes(pl) ? 'Již máte přístup' : null));
-    if (P.faction && c.faction !== P.faction) h += B('invite', 'Pozvat do aliance', '50 PM', pp(50) || (c.atWar && !HOA.allies(S, pl, tag) ? 'Stát je ve válce' : null));
-    if (c.faction && c.faction !== P.faction) h += B('request', `Požádat o vstup do ${esc(S.factions[c.faction].name)}`, '50 PM', pp(50));
-    h += B('guarantee', P.guarantees.includes(tag) ? 'Zrušit garanci' : 'Garantovat nezávislost', '25 PM', pp(25));
-    h += B('aidMoney', 'Finanční pomoc', '$1 mld', P.money < 1 ? 'Nedostatek peněz' : null);
-    h += B('aidEq', 'Poslat vybavení (10 %)', '', null);
-    if (!c.sanctions.includes(pl)) h += B('sanction', 'Uvalit sankce', '10 PM', pp(10));
-    if (c.atWar && HOA.allies(S, pl, tag)) h += B('callwar', 'Vstoupit do jejich války', '', null);
-    if (!P.wargoals.includes(tag) && !(P.justifying && P.justifying.target === tag)) h += B('justify', 'Ospravedlnit válečný cíl', '50 PM', pp(50) || (HOA.allies(S, pl, tag) ? 'Nelze proti spojenci' : null));
-    h += B('war', 'Vyhlásit válku', P.wargoals.includes(tag) ? '' : 'bez důvodu!', HOA.allies(S, pl, tag) && c.faction === P.faction ? 'Nejdřív opusťte společnou alianci' : null, 'danger');
+    btns.push(B('improve', 'Zlepšit vztahy', '25 PM', pp(25) || HOA.cooldown(P, tag, 'improve')));
+    btns.push(B('access', 'Požádat o vojenský přístup', '25 PM', pp(25) || (c.access.includes(pl) ? 'Již máte přístup' : null)));
+    if (P.faction && c.faction !== P.faction) btns.push(B('invite', 'Pozvat do aliance', '50 PM', pp(50) || (c.atWar && !HOA.allies(S, pl, tag) ? 'Stát je ve válce' : null)));
+    if (c.faction && c.faction !== P.faction) btns.push(B('request', `Požádat o vstup do ${S.factions[c.faction].name}`, '50 PM', pp(50)));
+    btns.push(B('guarantee', P.guarantees.includes(tag) ? 'Zrušit garanci' : 'Garantovat nezávislost', '25 PM', pp(25)));
+    btns.push(B('aidMoney', 'Finanční pomoc', '$1 mld', P.money < 1 ? 'Nedostatek peněz' : null));
+    btns.push(B('aidEq', 'Poslat vybavení (10 %)', '', null));
+    if (!c.sanctions.includes(pl)) btns.push(B('sanction', 'Uvalit sankce', '10 PM', pp(10)));
+    if (c.atWar && HOA.allies(S, pl, tag)) btns.push(B('callwar', 'Vstoupit do jejich války', '', null));
+    if (!P.wargoals.includes(tag) && !(P.justifying && P.justifying.target === tag)) btns.push(B('justify', 'Ospravedlnit válečný cíl', '50 PM', pp(50) || (HOA.allies(S, pl, tag) ? 'Nelze proti spojenci' : null)));
+    btns.push(B('war', 'Vyhlásit válku', P.wargoals.includes(tag) ? '' : 'bez důvodu!', HOA.allies(S, pl, tag) && c.faction === P.faction ? 'Nejdřív opusťte společnou alianci' : null, 'danger'));
   } else {
-    h += B('peaceWhite', 'Navrhnout bílý mír', '', null);
-    h += B('peaceFreeze', 'Navrhnout příměří na linii fronty', '', null);
-    h += B('peaceCede', 'Požadovat postoupení okupovaných území', '', null);
-    h += B('surrender', 'Kapitulovat', '', null, 'danger');
+    btns.push(B('peaceWhite', 'Navrhnout bílý mír', '', null));
+    btns.push(B('peaceFreeze', 'Navrhnout příměří na linii fronty', '', null));
+    btns.push(B('peaceCede', 'Požadovat postoupení okupovaných území', '', null));
+    btns.push(B('surrender', 'Kapitulovat', '', null, 'danger'));
   }
-  h += `</div>`;
-  return h;
-};
+  return html`${head}${grid}
+    <div class="kv"><span>Vztahy s vámi</span><b class=${rel >= 0 ? 'pos' : 'neg'}>${rel > 0 ? '+' : ''}${Math.round(rel)}</b></div>
+    ${flags.length ? html`<div class="chips">${flags.map((f, i) => html`${i ? ' ' : ''}${f}`)}</div>` : null}
+    ${c.alive ? html`<h3>Diplomacie</h3><div class="dipbtns">${btns}</div>` : null}`;
+}
 HOA.cooldown = function (P, tag, kind) {
-  const k = tag + ':' + kind;
-  const left = (P.lastDiplo[k] || 0) - HOA.S.day;
+  const left = (P.lastDiplo[tag + ':' + kind] || 0) - HOA.S.day;
   return left > 0 ? `Znovu za ${left} dní` : null;
 };
 
 // ---------- actions ----------
 HOA.act = function (name, arg, el) {
-  const S = HOA.S, W = HOA.W;
+  const S = HOA.S, W = HOA.W, UI = HOA.UI;
   const P = S.player && S.countries[S.player];
   switch (name) {
     case 'panel': HOA.openPanel(arg); return;
-    case 'closePanel': HOA.openPanel(HOA.UI.panel); return;
-    case 'closeSide': HOA.UI.side = null; HOA.R.selProv = -1; HOA.renderSide(); return;
-    case 'deselect': HOA.R.selected.clear(); HOA.renderSide(); return;
-    case 'speed': S.speed = +arg; S.paused = false; HOA.renderTop(); return;
-    case 'pause': S.paused = !S.paused; HOA.renderTop(); return;
-    case 'mode': HOA.R.mode = arg; HOA.markMapDirty(); HOA.R.baseDirty = true; document.querySelectorAll('#mapmodes button').forEach((b) => b.classList.toggle('on', b.dataset.arg === arg)); return;
-    case 'focusTree': HOA.showFocusTree(); return;
-    case 'closeFocus': $('#focus').classList.add('hidden'); return;
+    case 'closePanel': UI.panel = null; return;
+    case 'closeSide': UI.side = null; HOA.R.selProv = -1; return;
+    case 'deselect': HOA.R.selected.clear(); return;
+    case 'speed': S.speed = +arg; S.paused = false; return;
+    case 'pause': S.paused = !S.paused; return;
+    case 'mode': HOA.R.mode = arg; HOA.markMapDirty(); HOA.R.lastData = 0; return;
+    case 'focusTree': UI.focusOpen = true; return;
+    case 'closeFocus': UI.focusOpen = false; return;
     case 'pickFocus': {
       const f = HOA.focusTreeFor(P.tag).find((x) => x.id === arg);
       if (!f || !HOA.focusAvailable(S, P, f)) return;
       if (P.focus.cur && P.focus.prog > 0 && !confirm('Změnit národní cíl? Dosavadní postup bude ztracen.')) return;
       P.focus.cur = f.id; P.focus.prog = 0;
-      HOA.showFocusTree(); HOA.renderPanel();
       return;
     }
     case 'setLaw': {
@@ -612,12 +654,12 @@ HOA.act = function (name, arg, el) {
       const o = HOA.lawOpt(cat, id);
       if (P.pp < o.pp) return HOA.toast('Nedostatek politické moci.', 'warn');
       P.pp -= o.pp; P.laws[cat] = id; HOA.updateManpower(P, false);
-      HOA.renderPanel(); return;
+      return;
     }
     case 'research':
       if (!HOA.startResearch(P, arg)) HOA.toast('Všechny výzkumné sloty jsou obsazené.', 'warn');
-      HOA.renderPanel(); return;
-    case 'cancelResearch': P.research = P.research.filter((r) => r.id !== arg); HOA.renderPanel(); return;
+      return;
+    case 'cancelResearch': P.research = P.research.filter((r) => r.id !== arg); return;
     case 'build': {
       if (arg === 'fort') {
         const p = HOA.R.selProv;
@@ -626,30 +668,30 @@ HOA.act = function (name, arg, el) {
         P.build.push({ type: 'fort', p, prog: 0 });
       } else P.build.push({ type: arg, prog: 0 });
       HOA.toast(`Stavba zařazena: ${HOA.BUILD[arg].name}`, 'own');
-      HOA.renderPanel(); return;
+      return;
     }
-    case 'cancelBuild': P.build.splice(+arg, 1); HOA.renderPanel(); return;
+    case 'cancelBuild': P.build.splice(+arg, 1); return;
     case 'recruit': {
       const sp = HOA.R.selProv;
       const rally = sp >= 0 && HOA.canEnter(S, P.tag, sp) ? sp : null;
       if (!HOA.recruit(S, P, arg, rally)) HOA.toast(HOA.canRecruit(P, arg) || 'Nelze odvést.', 'warn');
-      HOA.renderPanel(); HOA.renderTop(); return;
+      return;
     }
     case 'toggleAI': P.aiArmy = el.checked; HOA.toast(P.aiArmy ? 'AI převzala velení fronty.' : 'Velení je ve vašich rukou.', 'own'); return;
-    case 'selectAll': HOA.R.selected = new Set(S.units.filter((u) => u.tag === P.tag).map((u) => u.id)); HOA.renderSide(); return;
-    case 'stopUnits': for (const u of S.units) if (HOA.R.selected.has(u.id) && !u.tr) { u.path = []; u.prog = 0; u.manual = S.day + 7; } HOA.renderSide(); return;
+    case 'selectAll': HOA.R.selected = new Set(S.units.filter((u) => u.tag === P.tag).map((u) => u.id)); return;
+    case 'stopUnits': for (const u of S.units) if (HOA.R.selected.has(u.id) && !u.tr) { u.path = []; u.prog = 0; u.manual = S.day + 7; } return;
     case 'disband':
       if (!confirm('Opravdu rozpustit vybrané jednotky?')) return;
       S.units = S.units.filter((u) => !HOA.R.selected.has(u.id));
-      HOA.R.selected.clear(); HOA.renderSide(); return;
-    case 'showCountry': HOA.showSide({ tag: arg, p: -1 }); return;
-    case 'dip': { const [k, t] = arg.split('|'); HOA.diplo(k, t || (HOA.UI.side && HOA.UI.side.tag)); return; }
+      HOA.R.selected.clear(); return;
+    case 'showCountry': UI.side = { tag: arg, p: -1 }; return;
+    case 'dip': { const [k, t] = arg.split('|'); HOA.diplo(k, t || (UI.side && UI.side.tag)); return; }
     case 'countryView': HOA.openCountryView(arg); return;
-    case 'buy': { const err = HOA.buyItem(S, P.tag, arg); if (err) HOA.toast(err, 'warn'); HOA.renderPanel(); HOA.renderTop(); return; }
+    case 'buy': { const err = HOA.buyItem(S, P.tag, arg); if (err) HOA.toast(err, 'warn'); return; }
     case 'nuke': {
       const p = +arg;
       if (!confirm(`Opravdu použít jadernou zbraň proti ${HOA.provName(p)}? Svět vám to neodpustí.`)) return;
-      HOA.nuke(S, W, P.tag, p); HOA.renderSide(); return;
+      HOA.nuke(S, W, P.tag, p); return;
     }
     case 'createFaction': {
       if (P.pp < 100) return HOA.toast('Nedostatek politické moci.', 'warn');
@@ -657,9 +699,9 @@ HOA.act = function (name, arg, el) {
       if (!nm) return;
       P.pp -= 100;
       HOA.createFaction(S, P.tag, nm.slice(0, 40));
-      HOA.renderPanel(); return;
+      return;
     }
-    case 'leaveFaction': if (confirm('Opustit alianci?')) { HOA.leaveFaction(S, P.tag); HOA.renderPanel(); } return;
+    case 'leaveFaction': if (confirm('Opustit alianci?')) HOA.leaveFaction(S, P.tag); return;
     case 'acceptInvite': HOA.joinFaction(S, S.player, arg); HOA.closeModal(); return;
     case 'eventOpt': {
       const [id, i] = arg.split(':');
@@ -668,13 +710,14 @@ HOA.act = function (name, arg, el) {
       if (ev && ev.opts) HOA.resolveEvent(S, W, ev, +i);
       return;
     }
+    case 'confirmWar': if (HOA._confirmWar) { HOA._confirmWar(); HOA._confirmWar = null; } HOA.closeModal(); return;
     case 'acceptPeace': HOA.makePeace(S, S.player, arg, 'cede'); HOA.closeModal(); return;
     case 'closeModal': HOA.closeModal(); return;
     case 'save': HOA.saveGame(); return;
     case 'load': HOA.loadGame(); return;
     case 'newGame': location.reload(); return;
     case 'choose': HOA.startAs(arg); return;
-    case 'menu': $('#menu').classList.toggle('hidden'); return;
+    case 'menu': UI.menuOpen = !UI.menuOpen; return;
     case 'help': HOA.showHelp(); return;
   }
 };
@@ -687,17 +730,13 @@ HOA.setProd = function (k, v) {
   const rest = others.reduce((s, x) => s + (c.prod[x] || 0), 0);
   const left = Math.max(0, 1 - v);
   for (const x of others) c.prod[x] = rest > 0 ? ((c.prod[x] || 0) / rest) * left : left / others.length;
-  document.querySelectorAll('[data-prod]').forEach((inp) => {
-    if (inp.dataset.prod !== k) inp.value = Math.round(c.prod[inp.dataset.prod] * 100);
-    inp.nextElementSibling.textContent = Math.round(c.prod[inp.dataset.prod] * 100) + ' %';
-  });
 };
 
 HOA.diplo = function (kind, tag) {
   const S = HOA.S, W = HOA.W;
   const pl = S.player, P = S.countries[pl], T = S.countries[tag];
   const spend = (n) => { if (P.pp < n) { HOA.toast('Nedostatek politické moci.', 'warn'); return false; } P.pp -= n; return true; };
-  const answer = (ok, yes, no) => HOA.toast(ok ? '✔ ' + yes : '✖ ' + no, ok ? 'own' : 'warn');
+  const answer = (ok, yes, no) => HOA.toast(ok ? yes : no, ok ? 'own' : 'warn');
   switch (kind) {
     case 'improve':
       if (!spend(25)) return;
@@ -740,7 +779,7 @@ HOA.diplo = function (kind, tag) {
     case 'aidEq':
       for (const k of ['inf', 'arm', 'art', 'aa', 'drn']) { const g = Math.floor(P.eq[k] * 0.1); P.eq[k] -= g; T.eq[k] += g; }
       HOA.addRel(S, tag, pl, 10);
-      HOA.news(S, `📦 ${P.name} posílá vojenskou pomoc státu ${T.name}.`, 'diplo');
+      HOA.news(S, `${P.name} posílá vojenskou pomoc státu ${T.name}.`, 'diplo');
       break;
     case 'sanction':
       if (!spend(10)) return;
@@ -761,8 +800,10 @@ HOA.diplo = function (kind, tag) {
     }
     case 'war': {
       const justified = P.wargoals.includes(tag);
-      const facs = T.faction && S.factions[T.faction] ? `<p>Na obranu se připojí celá aliance <b>${esc(S.factions[T.faction].name)}</b> (${S.factions[T.faction].members.length} států)!</p>` : '';
-      HOA.modal(`<h2>Vyhlásit válku státu ${esc(T.name)}?</h2>${justified ? '' : '<p class="neg">Nemáte válečný cíl: stabilita −20 %, vztahy se světem −30, světové napětí +20.</p>'}${facs}`, [
+      const fac = T.faction && S.factions[T.faction];
+      HOA.modal(html`<h2>Vyhlásit válku státu ${T.name}?</h2>
+        ${justified ? null : html`<p class="neg">Nemáte válečný cíl: stabilita −20 %, vztahy se světem −30, světové napětí +20.</p>`}
+        ${fac ? html`<p>Na obranu se připojí celá aliance <b>${fac.name}</b> (${fac.members.length} států)!</p>` : null}`, [
         { t: 'Vyhlásit válku', act: 'confirmWar', arg: tag, cls: 'danger' }, { t: 'Zpět', act: 'closeModal' }]);
       HOA._confirmWar = () => {
         if (T.faction && T.faction === P.faction) HOA.leaveFaction(S, pl);
@@ -786,58 +827,56 @@ HOA.diplo = function (kind, tag) {
       HOA.makePeace(S, tag, pl, 'cede');
       break;
   }
-  HOA.renderSide(); HOA.renderTop();
-  if (HOA.UI.panel === 'country') HOA.renderPanel();
   HOA.markMapDirty();
 };
-document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-act="confirmWar"]');
-  if (el && HOA._confirmWar) { HOA._confirmWar(); HOA._confirmWar = null; HOA.closeModal(); HOA.renderSide(); if (HOA.UI.panel === 'country') HOA.renderPanel(); }
-});
 
 // ---------- modal & events ----------
 HOA._dynEvents = {};
-HOA.modal = function (html, buttons) {
-  const m = $('#modal');
-  m.innerHTML = `<div class="mbox">${html}<div class="mbtns">${buttons.map((b) => `<button class="btn ${b.cls || ''}" data-act="${b.act}" data-arg="${esc(b.arg || '')}">${esc(b.t)}</button>`).join('')}</div></div>`;
-  m.classList.remove('hidden');
+HOA.modal = function (content, buttons) {
+  HOA.UI.modal = { content, buttons };
   HOA.S.modalPause = true;
+  HOA.uiRefresh();
 };
+function Modal({ m }) {
+  return html`<div id="modal"><div class="mbox">${m.content}<div class="mbtns">${m.buttons.map((b, i) => html`<button key=${i} class="btn ${b.cls || ''}" onClick=${on(b.act, b.arg || '')}>${b.t}</button>`)}</div></div></div>`;
+}
 HOA.closeModal = function () {
-  $('#modal').classList.add('hidden');
+  HOA.UI.modal = null;
   HOA.S.modalPause = false;
   if (HOA._eventQueue && HOA._eventQueue.length) HOA.showEvent(HOA._eventQueue.shift());
+  HOA.uiRefresh();
 };
 HOA.showEvent = function (ev) {
   const S = HOA.S;
-  if (!$('#modal').classList.contains('hidden')) { (HOA._eventQueue = HOA._eventQueue || []).push(ev); return; }
+  if (HOA.UI.modal) { (HOA._eventQueue = HOA._eventQueue || []).push(ev); return; }
   const decides = ev.tag === S.player && ev.opts && ev.opts.length && S.pendingEvents.includes(ev.id);
-  const who = ev.tag && S.countries[ev.tag] ? `<img class="flag" src="${HOA.flagURL(ev.tag, 30, 20)}"> ${esc(S.countries[ev.tag].name)}` : '🌍 Svět';
-  let html = `<div class="evhead"><div class="evimg">${ev.news ? '📰' : '⚑'}</div><div><small>${HOA.fmtDate(S.t)} • ${who}</small><h2>${esc(ev.title)}</h2></div></div><p>${esc(ev.desc)}</p>`;
-  if (ev.leader) html += `<p class="muted">Nový vůdce: <b>${esc(ev.leader[0])}</b> (${esc(ev.leader[1])})</p>`;
+  const who = ev.tag && S.countries[ev.tag] ? html`<${Flag} tag=${ev.tag} w=${30} h=${20} /> ${S.countries[ev.tag].name}` : 'Svět';
+  const content = html`<div class="event"><div class="evhead"><div class="evimg"><${Icon} n=${ev.news ? 'news' : 'flag'} /></div><div><small>${HOA.fmtDate(S.t)} • ${who}</small><h2>${ev.title}</h2></div></div><p>${ev.desc}</p>
+    ${ev.leader ? html`<p class="muted">Nový vůdce: <b>${ev.leader[0]}</b> (${ev.leader[1]})</p>` : null}</div>`;
   const btns = [];
   if (decides) ev.opts.forEach((o, i) => {
     const d = HOA.describeEff(S, o.eff);
     btns.push({ t: o.t + (d.length ? '  —  ' + d.join(', ') : ''), act: 'eventOpt', arg: ev.id + ':' + i });
   });
   else btns.push({ t: 'Rozumím', act: 'closeModal' });
-  HOA.modal(`<div class="event">${html}</div>`, btns);
+  HOA.modal(content, btns);
 };
 HOA.peaceOfferModal = function (tag) {
-  const S = HOA.S;
-  if (!$('#modal').classList.contains('hidden')) return;
-  HOA.modal(`<h2>Mírová nabídka</h2><p><b>${esc(S.countries[tag].name)}</b> nabízí mír a postoupení všech území, která okupujete.</p>`, [{ t: 'Přijmout mír', act: 'acceptPeace', arg: tag }, { t: 'Pokračovat ve válce', act: 'closeModal' }]);
+  if (HOA.UI.modal) return;
+  HOA.modal(html`<h2>Mírová nabídka</h2><p><b>${HOA.S.countries[tag].name}</b> nabízí mír a postoupení všech území, která okupujete.</p>`, [{ t: 'Přijmout mír', act: 'acceptPeace', arg: tag }, { t: 'Pokračovat ve válce', act: 'closeModal' }]);
 };
 
 // ---------- focus tree ----------
-HOA.showFocusTree = function () {
+HOA.showFocusTree = function () { HOA.UI.focusOpen = true; HOA.uiRefresh(); };
+
+function FocusTree() {
   const S = HOA.S, c = S.countries[S.player];
   const tree = HOA.focusTreeFor(c.tag);
   const NW = 168, NH = 74, GX = 186, GY = 112, PAD = 30;
   const maxX = Math.max(...tree.map((f) => f.x)), maxY = Math.max(...tree.map((f) => f.y));
   const w = (maxX + 1) * GX + PAD * 2, h = (maxY + 1) * GY + PAD * 2;
   const pos = (f) => [PAD + f.x * GX, PAD + f.y * GY];
-  let svg = `<svg width="${w}" height="${h}" class="flines">`;
+  const lines = [];
   for (const f of tree) {
     const [x, y] = pos(f);
     for (const r of (f.req || []).concat(f.reqAny || [])) {
@@ -845,34 +884,33 @@ HOA.showFocusTree = function () {
       if (!g) continue;
       const [gx, gy] = pos(g);
       const dashed = (f.reqAny || []).includes(r);
-      svg += `<path d="M${gx + NW / 2},${gy + NH} C${gx + NW / 2},${gy + NH + 25} ${x + NW / 2},${y - 25} ${x + NW / 2},${y}" class="${dashed ? 'dash' : ''} ${c.focus.done.includes(r) ? 'lit' : ''}"/>`;
+      lines.push(html`<path key=${f.id + '<' + r} d=${`M${gx + NW / 2},${gy + NH} C${gx + NW / 2},${gy + NH + 25} ${x + NW / 2},${y - 25} ${x + NW / 2},${y}`} class=${`${dashed ? 'dash' : ''} ${c.focus.done.includes(r) ? 'lit' : ''}`} />`);
     }
     for (const r of f.excl || []) {
       const g = tree.find((z) => z.id === r);
       if (!g || g.y !== f.y || g.x < f.x) continue;
       const [gx] = pos(g);
-      svg += `<line x1="${x + NW}" y1="${y + NH / 2}" x2="${gx}" y2="${y + NH / 2}" class="excl"/><text x="${(x + NW + gx) / 2}" y="${y + NH / 2 + 5}" class="exclx">✕</text>`;
+      lines.push(html`<line key=${f.id + 'x' + r} x1=${x + NW} y1=${y + NH / 2} x2=${gx} y2=${y + NH / 2} class="excl" /><text key=${f.id + 't' + r} x=${(x + NW + gx) / 2} y=${y + NH / 2 + 5} class="exclx">×</text>`);
     }
   }
-  svg += '</svg>';
-  let nodes = '';
-  for (const f of tree) {
-    const [x, y] = pos(f);
-    const done = c.focus.done.includes(f.id), cur = c.focus.cur === f.id, av = HOA.focusAvailable(S, c, f);
-    const blocked = f.excl && f.excl.some((r) => c.focus.done.includes(r));
-    const cls = done ? 'done' : cur ? 'cur' : av ? 'avail' : blocked ? 'blocked' : 'locked';
-    const effs = HOA.describeEff(S, f.eff);
-    const tip = `${f.name}\n${f.desc}\n\n${effs.join('\n')}\n\nDoba: ${f.days} dní`;
-    nodes += `<div class="fnode ${cls}" style="left:${x}px;top:${y}px;width:${NW}px;height:${NH}px" ${av ? `data-act="pickFocus" data-arg="${f.id}"` : ''} title="${esc(tip)}">
-      <div class="ficon">${done ? '✔' : cur ? '⏳' : '★'}</div><b>${esc(f.name)}</b><small>${f.days} dní</small>${cur ? HOA.bar(c.focus.prog / f.days, 'gold') : ''}</div>`;
-  }
   const cur = c.focus.cur && tree.find((f) => f.id === c.focus.cur);
-  const el = $('#focus');
-  el.innerHTML = `<div class="fhead"><img class="flag" src="${HOA.flagURL(c.tag, 36, 24)}"> Národní cíle – ${esc(c.name)} ${cur ? `<span class="muted">• probíhá: ${esc(cur.name)}</span>` : ''}<button class="x" data-act="closeFocus">✕</button></div>
-    <div class="fscroll"><div class="fcanvas" style="width:${w}px;height:${h}px">${svg}${nodes}</div></div>
-    <div class="fhint">Najeďte na cíl pro zobrazení efektů. Kliknutím na dostupný cíl jej zahájíte.</div>`;
-  el.classList.remove('hidden');
-};
+  return html`<div id="focus">
+    <div class="fhead"><${Flag} tag=${c.tag} w=${36} h=${24} /> Národní cíle – ${c.name} ${cur ? html`<span class="muted">• probíhá: ${cur.name}</span>` : null}<button class="x" onClick=${on('closeFocus')} title="Zavřít"><${Icon} n="x" /></button></div>
+    <div class="fscroll"><div class="fcanvas" style=${{ width: w + 'px', height: h + 'px' }}>
+      <svg width=${w} height=${h} class="flines">${lines}</svg>
+      ${tree.map((f) => {
+        const [x, y] = pos(f);
+        const done = c.focus.done.includes(f.id), isCur = c.focus.cur === f.id, av = HOA.focusAvailable(S, c, f);
+        const blocked = f.excl && f.excl.some((r) => c.focus.done.includes(r));
+        const cls = done ? 'done' : isCur ? 'cur' : av ? 'avail' : blocked ? 'blocked' : 'locked';
+        const tip = `${f.name}\n${f.desc}\n\n${HOA.describeEff(S, f.eff).join('\n')}\n\nDoba: ${f.days} dní`;
+        return html`<div key=${f.id} class="fnode ${cls}" style=${{ left: x + 'px', top: y + 'px', width: NW + 'px', height: NH + 'px' }} onClick=${av ? on('pickFocus', f.id) : null} title=${tip}>
+          <div class="ficon"><${Icon} n=${done ? 'check' : isCur ? 'clock' : 'star'} /></div><b>${f.name}</b><small>${f.days} dní</small>${isCur ? html`<${Bar} v=${c.focus.prog / f.days} cls="gold" />` : null}</div>`;
+      })}
+    </div></div>
+    <div class="fhint">Najeďte na cíl pro zobrazení efektů. Kliknutím na dostupný cíl jej zahájíte.</div>
+  </div>`;
+}
 
 // ---------- start screen ----------
 HOA.START_CHOICES = [
@@ -889,22 +927,16 @@ HOA.START_CHOICES = [
   ['TUR', 'Mezi Západem a Východem – Bayraktary na prodej.', 'Střední'],
   ['FIN', 'Neutralita, nebo NATO? 1 340 km hranice s Ruskem.', 'Střední'],
 ];
-HOA.renderStart = function () {
+function Start() {
   const S = HOA.S;
-  const has = (() => { try { return !!localStorage.getItem('hoa_save'); } catch (e) { return false; } })();
-  let h = `<div class="sbox"><div class="logo">HEARTS OF <span>ATOM</span></div><div class="sub">Velká strategie současnosti • Start: 24. února 2022, 04:00</div>
-    <div class="choices">`;
-  for (const [t, d, diff] of HOA.START_CHOICES) {
-    const c = S.countries[t];
-    h += `<div class="choice" data-act="choose" data-arg="${t}"><img class="flag" src="${HOA.flagURL(t, 60, 40)}"><div><b>${esc(c.name)}</b><small>${esc(c.leader)}</small><p>${esc(d)}</p><em>${diff}</em></div></div>`;
-  }
-  h += `</div><div class="shint">…nebo klikněte na <b>libovolnou zemi na glóbu</b> a zvolte ji v pravém panelu.</div>
-    <div class="row center">${has ? '<button class="btn gold" data-act="load">Načíst uloženou hru</button>' : ''}<button class="btn" data-act="help">Jak hrát</button></div></div>`;
-  $('#start').innerHTML = h;
-};
+  return html`<div id="start"><div class="sbox"><div class="logo">Hearts of<br /><span>Atom</span></div><div class="sub"><b>Velká strategie současnosti</b><span>Start 24. února 2022, 04:00</span></div>
+    <div class="choices">${HOA.START_CHOICES.map(([t, d, diff], i) => html`<div key=${t} class="choice" onClick=${on('choose', t)}><span class="cnum">${String(i + 1).padStart(2, '0')}</span><${Flag} tag=${t} w=${60} h=${40} /><div><b>${S.countries[t].name}</b><small>${S.countries[t].leader}</small><p>${d}</p><em class=${'diff d' + ['Snadná', 'Střední', 'Těžká'].indexOf(diff)}>${diff}</em></div></div>`)}</div>
+    <div class="shint">…nebo klikněte na <b>libovolnou zemi na glóbu</b> a zvolte ji v pravém panelu.</div>
+    <div class="row center">${HOA.UI.hasSave ? html`<button class="btn gold" onClick=${on('load')}>Načíst uloženou hru</button>` : null}<button class="btn" onClick=${on('help')}>Jak hrát</button></div></div></div>`;
+}
 
 HOA.showHelp = function () {
-  HOA.modal(`<h2>Jak hrát</h2><div class="help">
+  HOA.modal(html`<h2>Jak hrát</h2><div class="help">
   <p><b>Čas:</b> mezerník = pauza, klávesy 1–5 = rychlost. Hra se pozastaví při událostech.</p>
   <p><b>Mapa:</b> táhnutím otáčíte glóbem, kolečkem přibližujete. Klik na provincii zobrazí stát a diplomacii.</p>
   <p><b>Jednotky:</b> klik na žeton = výběr (Shift přidá), Shift + tažení = výběr oblastí, pravé tlačítko = přesun nebo útok. Zelený pruh = organizace, žlutý = síla. Červená linie je fronta.</p>
@@ -915,16 +947,33 @@ HOA.showHelp = function () {
   <p><b>Automatické velení</b> (panel Armáda) nechá AI řídit vaši frontu.</p></div>`, [{ t: 'Rozumím', act: 'closeModal' }]);
 };
 
-// ---------- save / load ----------
-HOA.saveGame = function () {
-  const S = HOA.S;
-  const data = JSON.stringify(S, (k, v) => (k.startsWith('_') || k === 'modalPause' ? undefined : v));
-  try { localStorage.setItem('hoa_save', data); HOA.toast('Hra uložena.', 'own'); } catch (e) { HOA.toast('Uložení selhalo: ' + e.message, 'warn'); }
-  $('#menu').classList.add('hidden');
+// ---------- save / load (IndexedDB) ----------
+// Old versions kept saves and leader bios in localStorage (5 MB cap); move them over once.
+HOA.migrateStorage = async function () {
+  let keys = [];
+  try { keys = Object.keys(localStorage).filter((k) => k === 'hoa_save' || k.startsWith('hoa_leader:')); } catch (e) { return; }
+  for (const k of keys) {
+    try {
+      const v = localStorage.getItem(k);
+      if ((await IDB.get(k)) === undefined) await IDB.set(k, k === 'hoa_save' ? v : JSON.parse(v));
+      localStorage.removeItem(k);
+    } catch (e) { /* keep the old copy if anything fails */ }
+  }
 };
-HOA.loadGame = function () {
+HOA.saveGame = async function () {
+  const S = HOA.S;
+  HOA.UI.menuOpen = false;
+  const data = JSON.stringify(S, (k, v) => (k.startsWith('_') || k === 'modalPause' ? undefined : v));
+  try {
+    await IDB.set('hoa_save', data);
+    HOA.UI.hasSave = true;
+    HOA.toast('Hra uložena.', 'own');
+  } catch (e) { HOA.toast('Uložení selhalo: ' + e.message, 'warn'); }
+};
+HOA.loadGame = async function () {
+  HOA.UI.menuOpen = false;
   let data;
-  try { data = localStorage.getItem('hoa_save'); } catch (e) { data = null; }
+  try { data = await IDB.get('hoa_save'); } catch (e) { data = null; }
   if (!data) return HOA.toast('Žádná uložená hra.', 'warn');
   const S = JSON.parse(data);
   S.paused = true;
@@ -934,7 +983,9 @@ HOA.loadGame = function () {
   S._unitsByTag = {};
   for (const u of S.units) (S._unitsByTag[u.tag] = S._unitsByTag[u.tag] || []).push(u);
   HOA.R.selected.clear();
+  HOA.R.colorOf.fill(null);
+  HOA.R.occKey = HOA.R.radKey = null;
+  HOA.UI.modal = null;
   HOA.startAs(S.player, true);
   HOA.toast('Hra načtena.', 'own');
-  $('#menu').classList.add('hidden');
 };

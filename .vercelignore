@@ -1,0 +1,3 @@
+# Local Bun dev server — not for Vercel (static deploy)
+server.ts
+tools/

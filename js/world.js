@@ -278,47 +278,7 @@ HOA.buildWorld = function (topo) {
   const coast = topojson.mesh(topo, topo.objects[OBJ], (a, b) => a === b);
   const land = topojson.merge(topo, geoms);
 
-  const featInfo = features.map((f) => {
-    if (!f.geometry) return { c: [0, 0], r: -10 };
-    const c = d3.geoCentroid(f);
-    const b = d3.geoBounds(f);
-    const r = Math.max(d3.geoDistance(c, b[0]), d3.geoDistance(c, b[1]), d3.geoDistance(c, [b[0][0], b[1][1]]), d3.geoDistance(c, [b[1][0], b[0][1]]));
-    return { c, r: Math.min(Math.PI, r + 0.02) };
-  });
-
-  // level-of-detail geometry sets (decimated shared arcs => borders stay consistent)
-  const meshes = (t) => ({
-    borderMesh: topojson.mesh(t, t.objects[OBJ], (a, b) => a !== b && featTag[a._i] !== featTag[b._i]),
-    innerMesh: topojson.mesh(t, t.objects[OBJ], (a, b) => a !== b && featTag[a._i] === featTag[b._i]),
-    coast: topojson.mesh(t, t.objects[OBJ], (a, b) => a === b),
-  });
-  const lods = [0.35, 0.12].map((eps) => {
-    const t = HOA.simplifyTopo(topo, eps);
-    const feats = topojson.feature(t, t.objects[OBJ]).features.map((f) => HOA.cleanFeature(f, eps));
-    return Object.assign({ eps, features: feats, land: HOA.cleanFeature({ type: 'Feature', geometry: topojson.merge(t, t.objects[OBJ].geometries) }, eps) }, meshes(t));
-  });
-  lods.push({ eps: 0, features, land, borderMesh, innerMesh, coast });
-  // whole-country shapes per LOD (drawn in one go when the country has a single colour)
-  const lodTopos = [HOA.simplifyTopo(topo, 0.35), HOA.simplifyTopo(topo, 0.12), topo];
-  lods.forEach((L, li) => {
-    L.countries = {};
-    for (const t in tagFeatures) {
-      const g = topojson.merge(lodTopos[li], tagFeatures[t].map((i) => lodTopos[li].objects[OBJ].geometries[i]));
-      L.countries[t] = li < 2 ? HOA.cleanFeature({ type: 'Feature', geometry: g }, L.eps) : { type: 'Feature', geometry: g };
-    }
-  });
-  const countryInfo = {};
-  for (const t in tagFeatures) {
-    let c = [0, 0], r = 0;
-    const fis = tagFeatures[t];
-    const big = fis.reduce((a, b) => (featInfo[b].r > featInfo[a].r ? b : a), fis[0]);
-    c = featInfo[big].c;
-    for (const fi of fis) if (featInfo[fi].r >= 0) r = Math.max(r, d3.geoDistance(c, featInfo[fi].c) + featInfo[fi].r);
-    countryInfo[t] = { c, r: Math.min(Math.PI, r), fis };
-  }
-  for (const L of lods) for (const k of ['borderMesh', 'innerMesh', 'coast']) L[k + 'Parts'] = HOA.chunkMesh(L[k]);
-
-  return { unowned: features.map((f, i) => i).filter((i) => featTag[i] === null && features[i].geometry), features, featTag, featName, featProv, featInfo, countryInfo, provinces, defs, borderMesh, innerMesh, coast, land, pairBorder, lods };
+  return { unowned: features.map((f, i) => i).filter((i) => featTag[i] === null && features[i].geometry), features, featTag, featName, featProv, provinces, defs, borderMesh, innerMesh, coast, land, pairBorder };
 };
 
 function W_nearest(ids, pt, provinces) {
@@ -385,53 +345,3 @@ HOA.labelPoint = function (f) {
   return bp;
 };
 
-// Decimate topology arcs (radial distance); endpoints kept so shared borders stay identical.
-HOA.simplifyTopo = function (topo, eps) {
-  const tf = topo.transform;
-  const arcs = topo.arcs.map((arc) => {
-    let x = 0, y = 0;
-    const pts = tf ? arc.map((p) => { x += p[0]; y += p[1]; return [x * tf.scale[0] + tf.translate[0], y * tf.scale[1] + tf.translate[1]]; }) : arc;
-    if (pts.length <= 2) return pts;
-    const out = [pts[0]];
-    let last = pts[0];
-    for (let i = 1; i < pts.length - 1; i++) {
-      const p = pts[i];
-      if (Math.abs(p[0] - last[0]) > eps || Math.abs(p[1] - last[1]) > eps) { out.push(p); last = p; }
-    }
-    out.push(pts[pts.length - 1]);
-    return out;
-  });
-  return { type: 'Topology', objects: topo.objects, arcs };
-};
-
-// Drop polygons that collapsed or flipped (would otherwise fill the whole globe).
-HOA.cleanFeature = function (f, eps) {
-  const g = f.geometry;
-  if (!g) return f;
-  const polys = g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : null;
-  if (!polys) return f;
-  const keep = polys.filter((poly) => {
-    const ring = poly[0];
-    if (!ring || ring.length < 4) return false;
-    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
-    for (const p of ring) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }
-    if (x1 - x0 < eps * 1.5 && y1 - y0 < eps * 1.5) return false;
-    return d3.geoArea({ type: 'Polygon', coordinates: poly }) < 2 * Math.PI;
-  });
-  return Object.assign({}, f, { geometry: { type: 'MultiPolygon', coordinates: keep } });
-};
-
-HOA.chunkMesh = function (mesh, size) {
-  size = size || 40;
-  const out = [];
-  for (const line of mesh.coordinates) {
-    for (let i = 0; i < line.length - 1; i += size) {
-      const seg = line.slice(i, Math.min(line.length, i + size + 1));
-      const c = seg[Math.floor(seg.length / 2)];
-      let r = 0;
-      for (const p of seg) r = Math.max(r, d3.geoDistance(c, p));
-      out.push({ coords: seg, c, r });
-    }
-  }
-  return out;
-};
