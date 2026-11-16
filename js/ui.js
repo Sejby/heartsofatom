@@ -43,6 +43,57 @@ const Bar = ({ v, cls }) => html`<div class="bar ${cls || ''}"><i style=${{ widt
 const Flag = ({ tag, w, h, cls }) => html`<img class="flag ${cls || ''}" src=${HOA.flagURL(tag, w, h)} />`;
 const Lines = ({ list }) => list.map((t, i) => html`${i ? html`<br />` : ''}${t}`);
 
+// ---------- icons ----------
+// Small stroke icon set (24×24, currentColor) used instead of emoji glyphs.
+const trefoil = (() => {
+  const P = (a, r) => `${(12 + r * Math.cos(a)).toFixed(2)} ${(12 + r * Math.sin(a)).toFixed(2)}`;
+  let d = '';
+  for (let k = 0; k < 3; k++) {
+    const a0 = -Math.PI / 2 - Math.PI / 6 + (k * 2 * Math.PI) / 3, a1 = a0 + Math.PI / 3;
+    d += `M${P(a0, 3)}L${P(a0, 9)}A9 9 0 0 1 ${P(a1, 9)}L${P(a1, 3)}A3 3 0 0 0 ${P(a0, 3)}Z`;
+  }
+  return `<path d="${d}" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>`;
+})();
+const ICONS = {
+  politics: '<path d="M3 21h18M5 10v11M9.5 10v11M14.5 10v11M19 10v11M2.5 10 12 3.5l9.5 6.5z"/>',
+  research: '<path d="M9 3h6M10 3v6.5L4.6 19a1.4 1.4 0 0 0 1.2 2h12.4a1.4 1.4 0 0 0 1.2-2L14 9.5V3M7.2 15h9.6"/>',
+  factory: '<path d="M2 21h20M3 21V10l5 3.5V10l5 3.5V10l5 3.5V4h3v17"/>',
+  shield: '<path d="M12 3 4.5 6v6c0 4.4 3.2 7.9 7.5 9 4.3-1.1 7.5-4.6 7.5-9V6z"/>',
+  link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
+  cart: '<path d="M3 4h2.5l2.2 10.5h10.6L20.5 7H6.3"/><circle cx="9" cy="19.5" r="1.3"/><circle cx="17" cy="19.5" r="1.3"/>',
+  swords: '<path d="M4 4l10 10M20 4 10 14M13 17l4-4M11 17l-4-4M16 16l4 4M8 16l-4 4"/>',
+  news: '<rect x="3" y="4" width="18" height="16"/><path d="M7 8h10M7 12h4M7 16h4M14 12h3v4h-3z"/>',
+  star: '<path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8-4.3-4.1 5.9-.9z"/>',
+  scale: '<path d="M12 4v16M7.5 20h9M4.5 7h15M6.5 7l-3 7a3 3 0 0 0 6 0zM17.5 7l-3 7a3 3 0 0 0 6 0z"/>',
+  flag: '<path d="M5 21V4M5 4h12.5l-2.5 4 2.5 4H5"/>',
+  people: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2a6.5 6.5 0 0 1 3.5 5.8"/>',
+  money: '<circle cx="12" cy="12" r="9"/><path d="M15 9.4C14.5 8.5 13.4 8 12 8c-1.7 0-3 .8-3 2s1.3 1.6 3 2 3 .8 3 2-1.3 2-3 2c-1.4 0-2.5-.5-3-1.4M12 6v2M12 16v2"/>',
+  nuke: trefoil,
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  pause: '<path d="M9 5v14M15 5v14"/>',
+  play: '<path d="M7 4.5v15l12-7.5z" fill="currentColor"/>',
+  x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  save: '<path d="M5 3h11l3 3v15H5zM8 3v5h7V3M8 21v-7h8v7"/>',
+  folder: '<path d="M3 5.5h6l2 2.5h10v12H3z"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.6v.6M12 17.2v.3"/>',
+  reset: '<path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4"/>',
+  up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+  ban: '<circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/>',
+  check: '<path d="M5 12.5 10 17.5 19 7"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.2 2"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.4 2.5 3.5 5.5 3.5 9s-1.1 6.5-3.5 9c-2.4-2.5-3.5-5.5-3.5-9S9.6 5.5 12 3z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  inf: '<circle cx="12" cy="12" r="6.5"/><path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5"/>',
+  arm: '<rect x="2.5" y="12" width="19" height="6.5" rx="3.2"/><path d="M6.5 12V8.5h8.5V12M15 9.8h6.5"/>',
+  art: '<path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5M5.3 5.3l3.5 3.5M15.2 15.2l3.5 3.5M18.7 5.3l-3.5 3.5M8.8 15.2l-3.5 3.5"/>',
+  aa: '<path d="M4 21h16M12 21v-6M5 8.5a7 7 0 0 0 14 0zM12 8.5 16 3"/>',
+  drn: '<circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8 8l8 8M16 8l-8 8"/>',
+  air: '<path d="M12 2.5c.8 0 1.3.9 1.3 2v5l7.7 4.5v2l-7.7-2.5v4.6l2.2 1.7v1.7L12 20.7l-3.5.8v-1.7l2.2-1.7v-4.6L3 16v-2l7.7-4.5v-5c0-1.1.5-2 1.3-2z"/>',
+};
+const Icon = ({ n, cls }) => html`<svg class="ic ${cls || ''}" viewBox="0 0 24 24" aria-hidden="true" dangerouslySetInnerHTML=${{ __html: ICONS[n] || '' }}></svg>`;
+HOA.Icon = Icon;
+
 // ---------- effect descriptions ----------
 HOA.unitTypeName = (t) => (t === 'all' ? 'všech jednotek' : HOA.UNITS[t] ? HOA.UNITS[t].name : t);
 HOA.describeBonus = function (b) {
@@ -126,10 +177,10 @@ HOA.toast = function (text, kind) {
 
 // ---------- app shell ----------
 HOA.PANELS = {
-  politics: '🏛 Politika', research: '🔬 Výzkum', production: '🏭 Výroba', army: '🎖 Armáda',
-  diplomacy: '🤝 Diplomacie', market: '🛒 Trh zbraní', wars: '⚔ Války', news: '📰 Zprávy',
+  politics: 'Politika', research: 'Výzkum', production: 'Výroba', army: 'Armáda',
+  diplomacy: 'Diplomacie', market: 'Trh zbraní', wars: 'Války', news: 'Zprávy',
 };
-const LEFT = [['politics', '🏛', 'Politika', 'Politika a národní cíle'], ['research', '🔬', 'Výzkum', 'Výzkum'], ['production', '🏭', 'Výroba', 'Výroba a stavby'], ['army', '🎖', 'Armáda', 'Armáda'], ['diplomacy', '🤝', 'Diplomacie', 'Diplomacie'], ['market', '🛒', 'Trh', 'Trh zbraní'], ['wars', '⚔', 'Války', 'Války'], ['news', '📰', 'Zprávy', 'Zprávy']];
+const LEFT = [['politics', 'politics', 'Politika', 'Politika a národní cíle'], ['research', 'research', 'Výzkum', 'Výzkum'], ['production', 'factory', 'Výroba', 'Výroba a stavby'], ['army', 'shield', 'Armáda', 'Armáda'], ['diplomacy', 'link', 'Diplomacie', 'Diplomacie'], ['market', 'cart', 'Trh', 'Trh zbraní'], ['wars', 'swords', 'Války', 'Války'], ['news', 'news', 'Zprávy', 'Zprávy']];
 const MODES = [['political', 'Politická'], ['faction', 'Aliance'], ['ideology', 'Ideologie'], ['relations', 'Vztahy', 'ingame'], ['war', 'Válka', 'ingame']];
 
 function App() {
@@ -137,7 +188,7 @@ function App() {
   return html`
     <${TopBar} />
     <div id="leftbar" class="ingame">
-      ${LEFT.map(([k, ic, label, tip]) => html`<button key=${k} class=${UI.panel === k ? 'on' : ''} title=${tip} onClick=${on('panel', k)}>${ic}<span>${label}</span></button>`)}
+      ${LEFT.map(([k, ic, label, tip]) => html`<button key=${k} class=${UI.panel === k ? 'on' : ''} title=${tip} onClick=${on('panel', k)}><${Icon} n=${ic} /><span>${label}</span></button>`)}
     </div>
     <${Panel} />
     <${Side} />
@@ -154,34 +205,35 @@ function App() {
 function TopBar() {
   const S = HOA.S, UI = HOA.UI;
   const c = S.countries[S.player];
-  const stat = (icon, val, tip, cls) => html`<div class="stat ${cls || ''}" title=${tip}><span class="ic">${icon}</span>${val}</div>`;
+  const stat = (icon, label, val, tip, cls) => html`<div class="stat ${cls || ''}" title=${tip}><span class="sl"><${Icon} n=${icon} />${label}</span><b>${val}</b></div>`;
+  const d = new Date(S.t);
   const units = c ? S.units.filter((u) => u.tag === c.tag).length : 0;
   return html`<div id="topbar" class="ingame">
     <div class="tb-country">${c ? html`<${Flag} tag=${c.tag} w=${48} h=${32} /><div><div class="tb-name">${c.name}</div><div class="tb-leader">${c.leader}</div></div>` : null}</div>
     <div class="tb-stats">${c ? [
-      stat('⚜', Math.round(c.pp), 'Politická moc – utrácí se za národní cíle, zákony a diplomacii'),
-      stat('⚖', pct(c.stab), 'Stabilita'),
-      stat('✊', pct(c.ws), 'Válečná podpora'),
-      stat('👥', fmtN(c.mp * 1000), 'Dostupné lidské zdroje'),
-      stat('$', money(c.money), 'Státní pokladna (rozpočet na obranu)'),
-      stat('🏭', `${c.civ}/${c.mil}`, 'Civilní / vojenské továrny'),
-      stat('⚔', units + (c.training.length ? `+${c.training.length}` : ''), 'Divize (v poli + ve výcviku)'),
-      stat('☢', c.nukes, 'Jaderné hlavice', c.nukes ? '' : 'dim'),
+      stat('star', 'Pol. moc', Math.round(c.pp), 'Politická moc – utrácí se za národní cíle, zákony a diplomacii'),
+      stat('scale', 'Stabilita', pct(c.stab), 'Stabilita'),
+      stat('flag', 'Vál. podpora', pct(c.ws), 'Válečná podpora'),
+      stat('people', 'Lidské zdroje', fmtN(c.mp * 1000), 'Dostupné lidské zdroje'),
+      stat('money', 'Pokladna', money(c.money), 'Státní pokladna (rozpočet na obranu)'),
+      stat('factory', 'Továrny C/V', `${c.civ}/${c.mil}`, 'Civilní / vojenské továrny'),
+      stat('shield', 'Divize', units + (c.training.length ? `+${c.training.length}` : ''), 'Divize (v poli + ve výcviku)'),
+      stat('nuke', 'Hlavice', c.nukes, 'Jaderné hlavice', c.nukes ? '' : 'dim'),
     ] : null}</div>
     <div class="tb-time">
       <div class="tension" title=${`Světové napětí: ${Math.round(S.tension)} %`}><i id="tension" style=${{ width: S.tension + '%' }}></i></div>
-      <div class="tb-date">${HOA.fmtDate(S.t, true)}</div>
+      <div class="tb-date">${HOA.fmtDate(S.t)}<small>${String(d.getUTCHours()).padStart(2, '0')}:00</small></div>
       <div class="speeds">
-        <button id="pauseBtn" class=${S.paused ? 'on' : ''} title="Pauza (mezerník)" onClick=${on('pause')}>${S.paused ? '▶' : '❚❚'}</button>
+        <button id="pauseBtn" class=${S.paused ? 'on' : ''} title="Pauza (mezerník)" onClick=${on('pause')}><${Icon} n=${S.paused ? 'play' : 'pause'} /></button>
         ${[1, 2, 3, 4, 5].map((n) => html`<button key=${n} class="spd ${n === S.speed && !S.paused ? 'on' : ''}" onClick=${on('speed', n)}>${n}</button>`)}
       </div>
     </div>
-    <button class="menubtn" title="Menu" onClick=${on('menu')}>☰</button>
+    <button class="menubtn" title="Menu" onClick=${on('menu')}><${Icon} n="menu" /></button>
     <div id="menu" class=${UI.menuOpen ? '' : 'hidden'}>
-      <button onClick=${on('save')}>💾 Uložit hru</button>
-      <button onClick=${on('load')}>📂 Načíst hru</button>
-      <button onClick=${on('help')}>❓ Jak hrát</button>
-      <button onClick=${on('newGame')}>↺ Nová hra</button>
+      <button onClick=${on('save')}><${Icon} n="save" />Uložit hru</button>
+      <button onClick=${on('load')}><${Icon} n="folder" />Načíst hru</button>
+      <button onClick=${on('help')}><${Icon} n="help" />Jak hrát</button>
+      <button onClick=${on('newGame')}><${Icon} n="reset" />Nová hra</button>
     </div>
   </div>`;
 }
@@ -195,10 +247,10 @@ HOA.openPanel = function (key) {
 function Panel() {
   const S = HOA.S, key = HOA.UI.panel;
   if (!key || !S.player) return html`<div id="panel" class="hidden"></div>`;
-  const title = key === 'country' && S.countries[HOA.UI.countryTag] ? '👤 ' + S.countries[HOA.UI.countryTag].name : HOA.PANELS[key];
+  const title = key === 'country' && S.countries[HOA.UI.countryTag] ? S.countries[HOA.UI.countryTag].name : HOA.PANELS[key];
   const Body = PANEL_BODY[key];
   return html`<div id="panel">
-    <div class="phead">${title}<button class="x" onClick=${on('closePanel')}>✕</button></div>
+    <div class="phead">${title}<button class="x" onClick=${on('closePanel')} title="Zavřít"><${Icon} n="x" /></button></div>
     <div class="pbody" key=${key === 'country' ? 'country:' + HOA.UI.countryTag : key}><${Body} /></div>
   </div>`;
 }
@@ -242,7 +294,7 @@ function ResearchPanel() {
     const r = c.research[i];
     if (r) {
       const t = HOA.TECH_BY_ID[r.id];
-      slotEls.push(html`<div key=${'s' + i} class="slot"><b>${t.name}</b><${Bar} v=${r.prog / (r.cost || t.cost)} cls="blue" /><small>${Math.round(r.prog)} / ${Math.round(r.cost || t.cost)} dní</small><button class="x" title="Zrušit" onClick=${on('cancelResearch', r.id)}>✕</button></div>`);
+      slotEls.push(html`<div key=${'s' + i} class="slot"><b>${t.name}</b><${Bar} v=${r.prog / (r.cost || t.cost)} cls="blue" /><small>${Math.round(r.prog)} / ${Math.round(r.cost || t.cost)} dní</small><button class="x" title="Zrušit" onClick=${on('cancelResearch', r.id)} title="Zavřít"><${Icon} n="x" /></button></div>`);
     } else slotEls.push(html`<div key=${'s' + i} class="slot empty">Volný výzkumný slot</div>`);
   }
   return html`<div class="slots">${slotEls}</div>
@@ -268,7 +320,7 @@ function ProductionPanel() {
       const E = HOA.EQUIP[k];
       const share = c.prod[k] || 0;
       const perDay = (milEff * share * (1 + (c.mods.prod[k] || 0) + (c.mods.prod.all || 0))) / E.cost;
-      return html`<div key=${k} class="prow"><span class="pic">${E.icon}</span><div class="pname">${E.name}<small>sklad: <b>${fmtN(c.eq[k])}</b> • +${perDay.toFixed(1).replace('.', ',')}/den</small></div>
+      return html`<div key=${k} class="prow"><span class="pic"><${Icon} n=${k} /></span><div class="pname">${E.name}<small>sklad: <b>${fmtN(c.eq[k])}</b> • +${perDay.toFixed(1).replace('.', ',')}/den</small></div>
         <input type="range" min="0" max="100" value=${Math.round(share * 100)} onInput=${(e) => { HOA.setProd(k, +e.currentTarget.value / 100); HOA.uiRefresh(); }} /><span class="pv">${Math.round(share * 100)} %</span></div>`;
     })}</div>
     <h3>Výstavba</h3><div class="muted">Civilní továrny: <b>${c.civ}</b> – každá stavba využije až 10 továren.</div>
@@ -277,7 +329,7 @@ function ProductionPanel() {
       : html`<div class="muted small">Pro stavbu opevnění vyberte na mapě vlastní provincii.</div>`}
     ${c.build.map((b, i) => {
       const cost = HOA.BUILD[b.type].cost * (b.type === 'fort' ? S.fort[b.p] + 1 : 1);
-      return html`<div key=${i} class="card"><b>${HOA.BUILD[b.type].name}${b.type === 'fort' ? ' – ' + HOA.provName(b.p) : ''}</b><${Bar} v=${b.prog / cost} cls="gold" /><button class="x" onClick=${on('cancelBuild', i)}>✕</button></div>`;
+      return html`<div key=${i} class="card"><b>${HOA.BUILD[b.type].name}${b.type === 'fort' ? ' – ' + HOA.provName(b.p) : ''}</b><${Bar} v=${b.prog / cost} cls="gold" /><button class="x" onClick=${on('cancelBuild', i)} title="Zavřít"><${Icon} n="x" /></button></div>`;
     })}
     ${c.deliveries.length ? html`<h3>Očekávané dodávky</h3>${c.deliveries.map((d, i) => html`<div key=${i} class="card">${d.name} – dorazí ${HOA.fmtDate(d.eta)}</div>`)}` : null}`;
 }
@@ -298,7 +350,7 @@ function ArmyPanel() {
     ${Object.keys(HOA.UNITS).map((t) => {
       const T = HOA.UNITS[t];
       const why = HOA.canRecruit(c, t);
-      const cost = Object.entries(T.eq).map(([k, v]) => `${v} ${HOA.EQUIP[k].icon}`).join(' ') + ` • ${T.mp}k 👥`;
+      const cost = html`${Object.entries(T.eq).map(([k, v]) => html`<span key=${k} class="cost" title=${HOA.EQUIP[k].name}><${Icon} n=${k} />${v}</span>`)}<span class="cost" title="Lidské zdroje (tis.)"><${Icon} n="people" />${T.mp}k</span>`;
       return html`<tr key=${t}><td><b>${T.name}</b></td><td>${Math.round(T.att * HOA.unitMod(c, 'att', t))}</td><td>${Math.round(T.def * HOA.unitMod(c, 'def', t))}</td><td>${T.spd}</td><td class="small">${cost}<br />${T.days} dní</td><td><button class="btn sm" disabled=${!!why} title=${why || ''} onClick=${on('recruit', t)}>Odvést</button></td></tr>`;
     })}</tbody></table>
     ${c.training.length ? html`<h3>Ve výcviku (${c.training.length})</h3>${c.training.map((t, i) => html`<div key=${i} class="card">${HOA.UNITS[t.type].name}<${Bar} v=${1 - t.days / t.total} cls="green" /><small>${t.days} dní</small></div>`)}` : null}
@@ -430,13 +482,13 @@ function CountryPanel() {
   const grad = sup.map(([id, v]) => { const a = acc; acc += v; return `${HOA.IDEOLOGIES[id].color} ${a}% ${acc}%`; }).join(',');
   const fac = c.faction && S.factions[c.faction];
   const spirits = [];
-  for (const t of (c.tmods || []).filter((t) => t.until > S.t)) spirits.push([t.att > 0 || t.def > 0 ? '⬆' : '⬇', t.name, (t.desc || '') + ` (do ${HOA.fmtDate(t.until)})`]);
-  spirits.push(['🏭', HOA.lawOpt('economy', c.laws.economy).name, HOA.lawOpt('economy', c.laws.economy).desc]);
-  spirits.push(['🎖', HOA.lawOpt('conscription', c.laws.conscription).name, HOA.lawOpt('conscription', c.laws.conscription).desc]);
-  if (c.sanctions.length) spirits.push(['⛔', 'Mezinárodní sankce', `${c.sanctions.length} států, HDP −${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} %`]);
-  if (c.nukes) spirits.push(['☢', 'Jaderná mocnost', `${c.nukes} hlavic`]);
-  if (c.atWar) spirits.push(['⚔', 'Ve válce', HOA.enemiesOf(S, tag).map((t) => S.countries[t].name).join(', ')]);
-  if (c.focus.cur) { const f = HOA.focusTreeFor(tag).find((x) => x.id === c.focus.cur); if (f) spirits.push(['★', 'Národní cíl: ' + f.name, f.desc]); }
+  for (const t of (c.tmods || []).filter((t) => t.until > S.t)) spirits.push([t.att > 0 || t.def > 0 ? 'up' : 'down', t.name, (t.desc || '') + ` (do ${HOA.fmtDate(t.until)})`]);
+  spirits.push(['factory', HOA.lawOpt('economy', c.laws.economy).name, HOA.lawOpt('economy', c.laws.economy).desc]);
+  spirits.push(['shield', HOA.lawOpt('conscription', c.laws.conscription).name, HOA.lawOpt('conscription', c.laws.conscription).desc]);
+  if (c.sanctions.length) spirits.push(['ban', 'Mezinárodní sankce', `${c.sanctions.length} států, HDP −${Math.round(Math.min(0.4, c.sanctions.length * 0.03) * 100)} %`]);
+  if (c.nukes) spirits.push(['nuke', 'Jaderná mocnost', `${c.nukes} hlavic`]);
+  if (c.atWar) spirits.push(['swords', 'Ve válce', HOA.enemiesOf(S, tag).map((t) => S.countries[t].name).join(', ')]);
+  if (c.focus.cur) { const f = HOA.focusTreeFor(tag).find((x) => x.id === c.focus.cur); if (f) spirits.push(['star', 'Národní cíl: ' + f.name, f.desc]); }
   const prov = S.owner.reduce((n, o) => n + (o === tag ? 1 : 0), 0);
   return html`<div class="cv-top">
       <div class="portrait"><img src=${info && info.img ? info.img : HOA.SILHOUETTE} alt="" /><div class="pname">${name || '—'}</div></div>
@@ -447,7 +499,7 @@ function CountryPanel() {
         <div class="cv-row"><span>Aliance</span><b>${fac ? fac.name : '—'}</b></div>
         <div class="cv-pie"><div class="pie" style=${{ background: `conic-gradient(${grad})` }}></div><div class="legend">${sup.map(([id, v]) => html`<div key=${id}><i style=${{ background: HOA.IDEOLOGIES[id].color }}></i>${HOA.IDEOLOGIES[id].name} <b>${v} %</b></div>`)}</div></div>
       </div></div>
-    <h3>Národní duch</h3><div class="spirits">${spirits.map(([i, n, d], k) => html`<div key=${k} class="spirit" title=${d}><span>${i}</span>${n}</div>`)}</div>
+    <h3>Národní duch</h3><div class="spirits">${spirits.map(([i, n, d], k) => html`<div key=${k} class="spirit" title=${d}><span><${Icon} n=${i} /></span>${n}</div>`)}</div>
     <h3>O vůdci</h3><div class="bio">${real ? (info ? html`<${Bio} inf=${info} />` : html`<span class="muted">Načítám z Wikipedie…</span>`) : html`<span class="muted">Bez podrobností.</span>`}</div>
     <h3>Stát</h3><div class="kv"><span>Provincie</span><b>${prov}</b></div><div class="kv"><span>Ztráty ve válkách</span><b>${fmtN(c.casualties)}</b></div>
     <${CountryInfo} tag=${tag} noHeader=${true} />`;
@@ -474,14 +526,14 @@ function Side() {
     HOA.R.selected.clear();
   }
   if (!sd) return html`<div id="side" class="hidden"></div>`;
-  return html`<div id="side"><button class="x close" onClick=${on('closeSide')}>✕</button>
+  return html`<div id="side"><button class="x close" onClick=${on('closeSide')} title="Zavřít"><${Icon} n="x" /></button>
     ${sd.p != null && sd.p >= 0 ? html`<${SideProvince} p=${sd.p} />` : null}
     ${sd.tag && S.countries[sd.tag] ? html`<${CountryInfo} tag=${sd.tag} />` : null}</div>`;
 }
 
 function SideUnits({ units }) {
   const S = HOA.S;
-  return html`<button class="x close" onClick=${on('deselect')}>✕</button><h2>Vybrané jednotky (${units.length})</h2>
+  return html`<button class="x close" onClick=${on('deselect')} title="Zavřít"><${Icon} n="x" /></button><h2>Vybrané jednotky (${units.length})</h2>
     <div class="row"><button class="btn sm" onClick=${on('stopUnits')}>Zastavit</button><button class="btn sm danger" onClick=${on('disband')}>Rozpustit</button></div>
     <div class="ulist">${units.slice(0, 60).map((u) => {
       const st = u.tr ? 'přesun' : u.inBattle ? 'v boji' : u.path.length ? 'na pochodu' : 'v pohotovosti';
@@ -515,11 +567,11 @@ function SideProvince({ p }) {
   if (pl && ct === pl) row.push(html`<button key="fort" class="btn sm" onClick=${on('build', 'fort')}>Opevnit</button>`);
   if (pl && ct && HOA.atWar(S, pl, ct) && S.countries[pl].nukes > 0) {
     const why = HOA.canNuke(S, pl, p);
-    row.push(html`<button key="nuke" class="btn sm danger" disabled=${!!why} title=${why || ''} onClick=${on('nuke', p)}>☢ Jaderný úder</button>`);
+    row.push(html`<button key="nuke" class="btn sm danger" disabled=${!!why} title=${why || ''} onClick=${on('nuke', p)}><${Icon} n="nuke" />Jaderný úder</button>`);
   }
   return html`<h2>${HOA.provName(p)}</h2><div class="kv"><span>Vlastník</span><b>${o ? S.countries[o].name : '—'}</b></div>
     ${ct !== o ? html`<div class="kv warn"><span>Okupant</span><b>${S.countries[ct].name}</b></div>` : null}
-    <div class="kv"><span>Body vítězství</span><b>${pr.vp}</b></div><div class="kv"><span>Opevnění</span><b>${'■'.repeat(S.fort[p])}${'□'.repeat(5 - S.fort[p])}</b></div>
+    <div class="kv"><span>Body vítězství</span><b>${pr.vp}</b></div><div class="kv"><span>Opevnění</span><b class="pips">${[0, 1, 2, 3, 4].map((i) => html`<i key=${i} class=${i < S.fort[p] ? 'on' : ''}></i>`)}</b></div>
     ${S.rad[p] > 0 ? html`<div class="kv warn"><span>Radiace</span><b>${S.rad[p]} dní</b></div>` : null}
     ${here.length ? html`<div class="muted small">Jednotky: ${[...new Set(here.map((u) => u.tag))].map((t) => `${here.filter((u) => u.tag === t).length}× ${S.countries[t].name}`).join(', ')}</div>` : null}
     ${row.length ? html`<div class="row">${row}</div>` : null}<hr />`;
@@ -532,7 +584,7 @@ function CountryInfo({ tag, noHeader }) {
   const units = S.units.filter((u) => u.tag === tag).length;
   const head = noHeader ? null : html`<div class="leader"><${Flag} tag=${tag} w=${72} h=${48} cls="big" /><div><h2>${c.name}</h2><b>${c.leader}</b><div class="muted">${c.gov}</div><div class="muted">${HOA.IDEOLOGIES[c.ideo].name}${c.faction && S.factions[c.faction] ? ' • ' + S.factions[c.faction].name : ''}</div><button class="linkbtn" onClick=${on('countryView', tag)}>Detail státu a vůdce ›</button></div></div>`;
   const grid = html`<div class="grid2"><div>HDP<b>${money(c.gdp)}</b></div><div>Populace<b>${c.pop} mil.</b></div><div>Divize<b>${units}</b></div><div>Továrny<b>${c.civ}/${c.mil}</b></div><div>Stabilita<b>${pct(c.stab)}</b></div><div>Vál. podpora<b>${pct(c.ws)}</b></div></div>
-    ${c.nukes ? html`<div class="kv"><span>Jaderné hlavice</span><b>☢ ${c.nukes}</b></div>` : null}`;
+    ${c.nukes ? html`<div class="kv"><span>Jaderné hlavice</span><b><${Icon} n="nuke" /> ${c.nukes}</b></div>` : null}`;
   if (!pl) return html`${head}${grid}${c.alive ? html`<button class="btn gold wide" onClick=${on('choose', tag)}>Hrát za stát ${c.name}</button>` : null}`;
   if (tag === pl) return html`${head}${grid}`;
   const rel = HOA.getRel(S, pl, tag);
@@ -684,7 +736,7 @@ HOA.diplo = function (kind, tag) {
   const S = HOA.S, W = HOA.W;
   const pl = S.player, P = S.countries[pl], T = S.countries[tag];
   const spend = (n) => { if (P.pp < n) { HOA.toast('Nedostatek politické moci.', 'warn'); return false; } P.pp -= n; return true; };
-  const answer = (ok, yes, no) => HOA.toast(ok ? '✔ ' + yes : '✖ ' + no, ok ? 'own' : 'warn');
+  const answer = (ok, yes, no) => HOA.toast(ok ? yes : no, ok ? 'own' : 'warn');
   switch (kind) {
     case 'improve':
       if (!spend(25)) return;
@@ -727,7 +779,7 @@ HOA.diplo = function (kind, tag) {
     case 'aidEq':
       for (const k of ['inf', 'arm', 'art', 'aa', 'drn']) { const g = Math.floor(P.eq[k] * 0.1); P.eq[k] -= g; T.eq[k] += g; }
       HOA.addRel(S, tag, pl, 10);
-      HOA.news(S, `📦 ${P.name} posílá vojenskou pomoc státu ${T.name}.`, 'diplo');
+      HOA.news(S, `${P.name} posílá vojenskou pomoc státu ${T.name}.`, 'diplo');
       break;
     case 'sanction':
       if (!spend(10)) return;
@@ -798,8 +850,8 @@ HOA.showEvent = function (ev) {
   const S = HOA.S;
   if (HOA.UI.modal) { (HOA._eventQueue = HOA._eventQueue || []).push(ev); return; }
   const decides = ev.tag === S.player && ev.opts && ev.opts.length && S.pendingEvents.includes(ev.id);
-  const who = ev.tag && S.countries[ev.tag] ? html`<${Flag} tag=${ev.tag} w=${30} h=${20} /> ${S.countries[ev.tag].name}` : '🌍 Svět';
-  const content = html`<div class="event"><div class="evhead"><div class="evimg">${ev.news ? '📰' : '⚑'}</div><div><small>${HOA.fmtDate(S.t)} • ${who}</small><h2>${ev.title}</h2></div></div><p>${ev.desc}</p>
+  const who = ev.tag && S.countries[ev.tag] ? html`<${Flag} tag=${ev.tag} w=${30} h=${20} /> ${S.countries[ev.tag].name}` : 'Svět';
+  const content = html`<div class="event"><div class="evhead"><div class="evimg"><${Icon} n=${ev.news ? 'news' : 'flag'} /></div><div><small>${HOA.fmtDate(S.t)} • ${who}</small><h2>${ev.title}</h2></div></div><p>${ev.desc}</p>
     ${ev.leader ? html`<p class="muted">Nový vůdce: <b>${ev.leader[0]}</b> (${ev.leader[1]})</p>` : null}</div>`;
   const btns = [];
   if (decides) ev.opts.forEach((o, i) => {
@@ -838,12 +890,12 @@ function FocusTree() {
       const g = tree.find((z) => z.id === r);
       if (!g || g.y !== f.y || g.x < f.x) continue;
       const [gx] = pos(g);
-      lines.push(html`<line key=${f.id + 'x' + r} x1=${x + NW} y1=${y + NH / 2} x2=${gx} y2=${y + NH / 2} class="excl" /><text key=${f.id + 't' + r} x=${(x + NW + gx) / 2} y=${y + NH / 2 + 5} class="exclx">✕</text>`);
+      lines.push(html`<line key=${f.id + 'x' + r} x1=${x + NW} y1=${y + NH / 2} x2=${gx} y2=${y + NH / 2} class="excl" /><text key=${f.id + 't' + r} x=${(x + NW + gx) / 2} y=${y + NH / 2 + 5} class="exclx">×</text>`);
     }
   }
   const cur = c.focus.cur && tree.find((f) => f.id === c.focus.cur);
   return html`<div id="focus">
-    <div class="fhead"><${Flag} tag=${c.tag} w=${36} h=${24} /> Národní cíle – ${c.name} ${cur ? html`<span class="muted">• probíhá: ${cur.name}</span>` : null}<button class="x" onClick=${on('closeFocus')}>✕</button></div>
+    <div class="fhead"><${Flag} tag=${c.tag} w=${36} h=${24} /> Národní cíle – ${c.name} ${cur ? html`<span class="muted">• probíhá: ${cur.name}</span>` : null}<button class="x" onClick=${on('closeFocus')} title="Zavřít"><${Icon} n="x" /></button></div>
     <div class="fscroll"><div class="fcanvas" style=${{ width: w + 'px', height: h + 'px' }}>
       <svg width=${w} height=${h} class="flines">${lines}</svg>
       ${tree.map((f) => {
@@ -853,7 +905,7 @@ function FocusTree() {
         const cls = done ? 'done' : isCur ? 'cur' : av ? 'avail' : blocked ? 'blocked' : 'locked';
         const tip = `${f.name}\n${f.desc}\n\n${HOA.describeEff(S, f.eff).join('\n')}\n\nDoba: ${f.days} dní`;
         return html`<div key=${f.id} class="fnode ${cls}" style=${{ left: x + 'px', top: y + 'px', width: NW + 'px', height: NH + 'px' }} onClick=${av ? on('pickFocus', f.id) : null} title=${tip}>
-          <div class="ficon">${done ? '✔' : isCur ? '⏳' : '★'}</div><b>${f.name}</b><small>${f.days} dní</small>${isCur ? html`<${Bar} v=${c.focus.prog / f.days} cls="gold" />` : null}</div>`;
+          <div class="ficon"><${Icon} n=${done ? 'check' : isCur ? 'clock' : 'star'} /></div><b>${f.name}</b><small>${f.days} dní</small>${isCur ? html`<${Bar} v=${c.focus.prog / f.days} cls="gold" />` : null}</div>`;
       })}
     </div></div>
     <div class="fhint">Najeďte na cíl pro zobrazení efektů. Kliknutím na dostupný cíl jej zahájíte.</div>
@@ -877,8 +929,8 @@ HOA.START_CHOICES = [
 ];
 function Start() {
   const S = HOA.S;
-  return html`<div id="start"><div class="sbox"><div class="logo">HEARTS OF <span>ATOM</span></div><div class="sub">Velká strategie současnosti • Start: 24. února 2022, 04:00</div>
-    <div class="choices">${HOA.START_CHOICES.map(([t, d, diff]) => html`<div key=${t} class="choice" onClick=${on('choose', t)}><${Flag} tag=${t} w=${60} h=${40} /><div><b>${S.countries[t].name}</b><small>${S.countries[t].leader}</small><p>${d}</p><em>${diff}</em></div></div>`)}</div>
+  return html`<div id="start"><div class="sbox"><div class="logo">Hearts of<br /><span>Atom</span></div><div class="sub"><b>Velká strategie současnosti</b><span>Start 24. února 2022, 04:00</span></div>
+    <div class="choices">${HOA.START_CHOICES.map(([t, d, diff], i) => html`<div key=${t} class="choice" onClick=${on('choose', t)}><span class="cnum">${String(i + 1).padStart(2, '0')}</span><${Flag} tag=${t} w=${60} h=${40} /><div><b>${S.countries[t].name}</b><small>${S.countries[t].leader}</small><p>${d}</p><em class=${'diff d' + ['Snadná', 'Střední', 'Těžká'].indexOf(diff)}>${diff}</em></div></div>`)}</div>
     <div class="shint">…nebo klikněte na <b>libovolnou zemi na glóbu</b> a zvolte ji v pravém panelu.</div>
     <div class="row center">${HOA.UI.hasSave ? html`<button class="btn gold" onClick=${on('load')}>Načíst uloženou hru</button>` : null}<button class="btn" onClick=${on('help')}>Jak hrát</button></div></div></div>`;
 }

@@ -124,10 +124,9 @@ HOA.initRender = function (container, overlay, stars, W) {
       occ: { type: 'geojson', data: empty, tolerance: 0.3 },
       rad: { type: 'geojson', data: empty },
       front: { type: 'geojson', data: empty },
-      hl: { type: 'geojson', data: empty },
     },
     layers: [
-      { id: 'ocean', type: 'background', paint: { 'background-color': '#183847' } },
+      { id: 'ocean', type: 'background', paint: { 'background-color': '#10232a' } },
       { id: 'grat', type: 'line', source: 'grat', paint: { 'line-color': '#ffffff', 'line-opacity': 0.05, 'line-width': 0.6 } },
       // raised-land shadow (2.5D)
       { id: 'shadow', type: 'fill', source: 'prov', paint: { 'fill-color': '#000', 'fill-opacity': 0.55, 'fill-antialias': false, 'fill-translate': ['interpolate', ['linear'], ['zoom'], 2, ['literal', [0.8, 1.3]], 6, ['literal', [2.5, 4]]] } },
@@ -140,7 +139,13 @@ HOA.initRender = function (container, overlay, stars, W) {
       { id: 'coast', type: 'line', source: 'coast', paint: { 'line-color': '#0a1928', 'line-opacity': 0.9, 'line-width': 0.9 } },
       { id: 'front-glow', type: 'line', source: 'front', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ff3c28', 'line-opacity': 0.35, 'line-width': 5 } },
       { id: 'front', type: 'line', source: 'front', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ff4a2c', 'line-width': 1.8 } },
-      { id: 'hl', type: 'line', source: 'hl', paint: { 'line-color': ['get', 'col'], 'line-width': ['get', 'w'] } },
+      // hover / selection outline: drawn from the province source and toggled via feature-state,
+      // so moving the mouse never re-uploads geometry (setData would re-tile in the worker each time)
+      { id: 'hl', type: 'line', source: 'prov', paint: {
+        'line-color': ['case', ['boolean', ['feature-state', 'sel'], false], '#ffe066', 'rgba(255,255,255,0.55)'],
+        'line-width': ['case', ['boolean', ['feature-state', 'sel'], false], 2, ['boolean', ['feature-state', 'hov'], false], 1.2, 0],
+        'line-opacity': ['case', ['any', ['boolean', ['feature-state', 'sel'], false], ['boolean', ['feature-state', 'hov'], false]], 1, 0],
+      } },
     ],
   };
   const map = new maplibregl.Map({
@@ -174,7 +179,7 @@ HOA.resize = function () {
   const bx = R.starsCanvas.getContext('2d');
   bx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const bg = bx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.8);
-  bg.addColorStop(0, '#141c26'); bg.addColorStop(1, '#05070b');
+  bg.addColorStop(0, '#13160f'); bg.addColorStop(1, '#050604');
   bx.fillStyle = bg; bx.fillRect(0, 0, w, h);
   for (const [x, y, s, a] of R.stars) { bx.fillStyle = `rgba(255,255,255,${0.15 + a * 0.5})`; bx.fillRect(x * w, y * h, s, s); }
   if (R.map) R.map.resize();
@@ -365,18 +370,23 @@ HOA.drawFrame = function (S) {
     R.mapDirty = false;
     R.lastData = now;
   }
-  const hlKey = R.hoverProv + '|' + R.selProv;
-  if (hlKey !== R.hlKey) {
-    R.hlKey = hlKey;
-    const feats = [];
-    for (const [p, col, w] of [[R.hoverProv, 'rgba(255,255,255,0.55)', 1.2], [R.selProv, '#ffe066', 2]]) {
-      if (p >= 0 && W.provGeom[p]) feats.push({ type: 'Feature', properties: { col, w }, geometry: W.provGeom[p] });
-    }
-    R.map.getSource('hl').setData({ type: 'FeatureCollection', features: feats });
-  }
+  HOA.syncHighlight();
   // the overlay animates (unit movement, battle pulse, nuclear flashes): keep frames coming while it does
   const animating = (S.player && !S.paused && !S.modalPause) || (S.battles && S.battles.length) || S.nukeFx.length || R.box;
   if (animating) R.map.triggerRepaint();
+};
+
+// Hover/selection outline via feature-state: only the changed feature's paint attributes are touched.
+HOA.syncHighlight = function () {
+  const R = HOA.R, W = R.W, map = R.map;
+  const set = (key, prev, next) => {
+    if (prev === next) return next;
+    if (prev >= 0 && W.provGeom[prev]) map.setFeatureState({ source: 'prov', id: prev }, { [key]: false });
+    if (next >= 0 && W.provGeom[next]) map.setFeatureState({ source: 'prov', id: next }, { [key]: true });
+    return next;
+  };
+  R.hlHov = set('hov', R.hlHov ?? -1, R.hoverProv);
+  R.hlSel = set('sel', R.hlSel ?? -1, R.selProv);
 };
 
 HOA.drawOverlay = function (S) {
@@ -752,11 +762,12 @@ HOA.preloadAssets = async function (S, progress) {
     map.getSource('occ').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { pat: HOA.hatchImage('#ffffff') }, geometry: g }] });
     map.getSource('rad').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { a: 0.01 }, geometry: g }] });
     map.getSource('front').setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [pt, pt2] } });
-    map.getSource('hl').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { col: '#ffffff', w: 1 }, geometry: { type: 'LineString', coordinates: [pt, pt2] } }] });
+    map.setFeatureState({ source: 'prov', id: p0 }, { hov: true });
     // timeout: 'idle' never fires in a background tab
     await new Promise((r) => { map.once('idle', r); setTimeout(r, 2000); map.triggerRepaint(); });
     const empty = { type: 'FeatureCollection', features: [] };
-    for (const id of ['occ', 'rad', 'front', 'hl']) map.getSource(id).setData(empty);
+    for (const id of ['occ', 'rad', 'front']) map.getSource(id).setData(empty);
+    map.setFeatureState({ source: 'prov', id: p0 }, { hov: false });
     R.occKey = R.radKey = R.front = undefined;
   }
 

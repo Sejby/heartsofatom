@@ -6,7 +6,7 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
 (function () {
   const HPS = { 1: 1.5, 2: 5, 3: 14, 4: 36, 5: 96 }; // in-game hours per real second
   let W, dayChanged = false;
-  const input = { down: false, sx: 0, sy: 0, drag: false, lastHover: 0 };
+  const input = { down: false, sx: 0, sy: 0, drag: false, hoverEv: null, hoverRaf: 0, tipKey: null };
 
   async function boot() {
     W = HOA.buildWorld(window.REGIONS_TOPO);
@@ -83,7 +83,7 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
     const el = document.getElementById('map');
     const tip = document.getElementById('tooltip');
     const onMap = (e) => el.contains(e.target);
-    R.map.on('movestart', () => tip.classList.add('hidden'));
+    R.map.on('movestart', hideTip);
 
     // capture phase: runs before MapLibre's own handlers, so Shift+drag can switch panning off
     document.addEventListener('mousedown', (e) => {
@@ -100,17 +100,25 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
         if (!input.drag && Math.hypot(e.clientX - input.sx, e.clientY - input.sy) > 4) input.drag = true;
         return;
       }
-      if (!onMap(e)) { tip.classList.add('hidden'); return; }
-      const now = performance.now();
-      if (now - input.lastHover < 60) return;
-      input.lastHover = now;
-      const p = HOA.pickProvince(e.clientX, e.clientY);
-      R.hoverProv = p;
+      if (!onMap(e)) { hideTip(); return; }
+      // coalesce to one pick per animation frame (mousemove fires far more often than we draw)
+      input.hoverEv = e;
+      if (!input.hoverRaf) input.hoverRaf = requestAnimationFrame(doHover);
+    });
+    function doHover() {
+      input.hoverRaf = 0;
+      const e = input.hoverEv;
+      if (!e || input.down) return;
       const cnt = HOA.pickCounter(e.clientX, e.clientY);
+      const p = HOA.pickProvince(e.clientX, e.clientY);
+      if (p !== R.hoverProv) {
+        R.hoverProv = p;
+        HOA.syncHighlight();
+      }
       if (cnt) showUnitTip(cnt, e);
       else if (p >= 0) showProvTip(p, e);
-      else tip.classList.add('hidden');
-    });
+      else hideTip();
+    }
     window.addEventListener('mouseup', (e) => {
       if (!input.down || e.button !== 0) return;
       input.down = false;
@@ -191,8 +199,16 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
     HOA.uiRefresh();
   }
 
+  function hideTip() {
+    if (input.tipKey === null) return;
+    input.tipKey = null;
+    document.getElementById('tooltip').classList.add('hidden');
+  }
   function showProvTip(p, e) {
     const S = HOA.S, tip = document.getElementById('tooltip');
+    const key = 'p' + p + S.owner[p] + S.ctrl[p] + S.fort[p];
+    if (key === input.tipKey) return placeTip(tip, e);
+    input.tipKey = key;
     const o = S.owner[p], c = S.ctrl[p];
     const esc = HOA.esc;
     let h = `<b>${esc(HOA.provName(p))}</b>`;
@@ -204,7 +220,7 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
   }
   function showUnitTip(cnt, e) {
     const S = HOA.S, tip = document.getElementById('tooltip');
-    const tc = {};
+    input.tipKey = 'u' + cnt.units.map((u) => u.id).join(',');
     cnt.units.forEach((u) => (tc[u.type] = (tc[u.type] || 0) + 1));
     let h = `<b>${HOA.esc(S.countries[cnt.tag].name)}</b> – ${cnt.units.length} divizí<br>` + Object.entries(tc).map(([t, n]) => `${n}× ${HOA.UNITS[t].name}`).join('<br>');
     const str = cnt.units.reduce((s, u) => s + u.str, 0) / cnt.units.length;
@@ -212,10 +228,17 @@ window.addEventListener('error', (e) => { const d = document.getElementById('err
     tip.innerHTML = h;
     placeTip(tip, e);
   }
+  // size is measured only when the content changes; moving just updates a transform (no layout)
   function placeTip(tip, e) {
-    tip.classList.remove('hidden');
-    tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 8, e.clientX + 14) + 'px';
-    tip.style.top = Math.min(window.innerHeight - tip.offsetHeight - 8, e.clientY + 14) + 'px';
+    if (tip.classList.contains('hidden') || input.tipKey !== input.tipSized) {
+      tip.classList.remove('hidden');
+      tip.style.left = tip.style.top = '0px';
+      input.tipW = tip.offsetWidth; input.tipH = tip.offsetHeight;
+      input.tipSized = input.tipKey;
+    }
+    const x = Math.min(window.innerWidth - input.tipW - 8, e.clientX + 14);
+    const y = Math.min(window.innerHeight - input.tipH - 8, e.clientY + 14);
+    tip.style.transform = `translate(${x}px,${y}px)`;
   }
 
   window.addEventListener('load', () => setTimeout(boot, 30));
