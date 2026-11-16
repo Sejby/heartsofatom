@@ -1,10 +1,11 @@
-// Globe renderer: 2.5D orthographic globe with provinces, borders, front lines, unit counters.
+// Map renderer: WebGL globe (MapLibre GL, globe projection) for provinces, borders, front lines,
+// occupation hatching and radiation; a thin 2D overlay canvas on top for unit counters, orders,
+// battles, labels and effects (screen-space HUD elements that move every frame).
 window.HOA = window.HOA || {};
 
 HOA.R = {
-  view: { lon: 33, lat: 49, scale: 2400 },
+  view: { lon: 33, lat: 49, scale: 2400 }, // read-only mirror of the camera; change it with HOA.setView
   mode: 'political',
-  baseDirty: true,
   mapDirty: true,
   counters: [],
   selected: new Set(),
@@ -13,36 +14,151 @@ HOA.R = {
   box: null,
 };
 HOA.markMapDirty = function () { HOA.R.mapDirty = true; HOA.R.frontStale = true; };
-// call on camera change: redraw base in fast mode until interaction settles
-HOA.viewChanged = function () { HOA.R.baseDirty = true; HOA.R.interactUntil = performance.now() + 220; };
+HOA.viewChanged = function () { if (HOA.R.map) HOA.R.map.triggerRepaint(); };
 
-HOA.initRender = function (canvas, W) {
+const UNOWNED_ID = 100000; // feature ids for land without provinces (Antarctica)
+
+// ---------- geometry ----------
+// Clip polygon rings to an axis-aligned box (Sutherland–Hodgman). Cheap pre-pass so the exact
+// polygon intersection below only sees the few hundred vertices near a Voronoi cell.
+function clipRing(ring, x0, y0, x1, y1) {
+  const edges = [
+    (p) => p[0] >= x0, (a, b) => [x0, a[1] + ((b[1] - a[1]) * (x0 - a[0])) / (b[0] - a[0])],
+    (p) => p[0] <= x1, (a, b) => [x1, a[1] + ((b[1] - a[1]) * (x1 - a[0])) / (b[0] - a[0])],
+    (p) => p[1] >= y0, (a, b) => [a[0] + ((b[0] - a[0]) * (y0 - a[1])) / (b[1] - a[1]), y0],
+    (p) => p[1] <= y1, (a, b) => [a[0] + ((b[0] - a[0]) * (y1 - a[1])) / (b[1] - a[1]), y1],
+  ];
+  let out = ring;
+  for (let e = 0; e < 8 && out.length; e += 2) {
+    const inside = edges[e], cut = edges[e + 1];
+    const src = out;
+    out = [];
+    for (let i = 0; i < src.length; i++) {
+      const a = src[i], b = src[(i + 1) % src.length];
+      const ia = inside(a), ib = inside(b);
+      if (ia) out.push(a);
+      if (ia !== ib) out.push(cut(a, b));
+    }
+  }
+  if (out.length < 3) return null;
+  out.push(out[0]);
+  return out;
+}
+function polysOf(g) { return g.type === 'Polygon' ? [g.coordinates] : g.type === 'MultiPolygon' ? g.coordinates : []; }
+function shiftPolys(polys, fn) { return polys.map((poly) => poly.map((ring) => ring.map(fn))); }
+
+// One GeoJSON feature per province, with its exact shape. Regions split into several provinces
+// are cut along their Voronoi cells (the old Canvas renderer did this with clip paths at draw time).
+HOA.buildProvinceGeo = function (W) {
+  const t0 = performance.now();
+  const feats = [];
+  const geom = new Array(W.provinces.length).fill(null);
+  W.features.forEach((f, fi) => {
+    const ids = W.featProv[fi];
+    if (!f.geometry || !ids.length) return;
+    if (ids.length === 1) { geom[ids[0]] = f.geometry; return; }
+    const b = d3.geoBounds(f);
+    const wrap = b[0][0] > b[1][0];
+    let polys = polysOf(f.geometry);
+    if (wrap) polys = shiftPolys(polys, (p) => (p[0] < 0 ? [p[0] + 360, p[1]] : p));
+    for (const id of ids) {
+      const cell = W.provinces[id].poly;
+      if (!cell) continue;
+      const ring = cell.coordinates[0];
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const p of ring) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }
+      // margin: the box pre-clip leaves zero-width slivers along its edges; keep them outside the cell
+      x0 -= 0.5; y0 -= 0.5; x1 += 0.5; y1 += 0.5;
+      const local = [];
+      for (const poly of polys) {
+        const outer = clipRing(poly[0].slice(0, -1), x0, y0, x1, y1);
+        if (!outer) continue;
+        const holes = poly.slice(1).map((h) => clipRing(h.slice(0, -1), x0, y0, x1, y1)).filter(Boolean);
+        local.push([outer, ...holes]);
+      }
+      if (!local.length) continue;
+      try {
+        let res = polygonClipping.intersection(local, [ring]);
+        // regions across the antimeridian were cut in 0..360° space: split the result back into ±180°
+        if (wrap) {
+          const box = (a, b) => [[[a, -90], [b, -90], [b, 90], [a, 90], [a, -90]]];
+          const west = polygonClipping.intersection(res, box(-180, 180));
+          const east = polygonClipping.intersection(res, box(180, 540)).map((poly) => poly.map((r) => r.map((p) => [p[0] - 360, p[1]])));
+          res = west.concat(east);
+        }
+        if (res.length) geom[id] = { type: 'MultiPolygon', coordinates: res };
+      } catch (e) {
+        geom[id] = cell; // degenerate input: fall back to the raw cell
+      }
+    }
+  });
+  W.provinces.forEach((p, id) => { if (geom[id]) feats.push({ type: 'Feature', id, properties: {}, geometry: geom[id] }); });
+  for (const fi of W.unowned) feats.push({ type: 'Feature', id: UNOWNED_ID + fi, properties: { u: 1 }, geometry: W.features[fi].geometry });
+  W.provGeom = geom;
+  HOA.R.geoBuildMs = performance.now() - t0;
+  return { type: 'FeatureCollection', features: feats };
+};
+
+// ---------- init ----------
+HOA.initRender = function (container, overlay, stars, W) {
   const R = HOA.R;
   R.W = W;
-  R.canvas = canvas;
-  R.ctx = canvas.getContext('2d');
-  R.base = document.createElement('canvas');
-  R.fastBase = document.createElement('canvas');
-  R.proj = d3.geoOrthographic().clipAngle(90).precision(0.6);
-  R.path = d3.geoPath(R.proj);
-  R.graticule = d3.geoGraticule10();
-  // paper/terrain noise pattern
-  const n = document.createElement('canvas');
-  n.width = n.height = 160;
-  const nctx = n.getContext('2d');
-  const img = nctx.createImageData(160, 160);
+  R.overlay = overlay;
+  R.ctx = overlay.getContext('2d');
+  R.starsCanvas = stars;
   const rnd = HOA.rng(7);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = 110 + rnd() * 145;
-    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
-    img.data[i + 3] = 255;
-  }
-  nctx.putImageData(img, 0, 0);
-  R.noise = n;
-  // stars
   R.stars = [];
   for (let i = 0; i < 260; i++) R.stars.push([rnd(), rnd(), rnd() * 1.2 + 0.2, rnd()]);
+  const provFC = HOA.buildProvinceGeo(W);
+  const line = (data) => ({ type: 'geojson', data, tolerance: 0.5 });
+  const empty = { type: 'FeatureCollection', features: [] };
+  const style = {
+    version: 8,
+    projection: { type: 'globe' },
+    sources: {
+      prov: { type: 'geojson', data: provFC, tolerance: 0.3, buffer: 32 },
+      grat: line(d3.geoGraticule10()),
+      inner: line({ type: 'Feature', properties: {}, geometry: W.innerMesh }),
+      borders: line({ type: 'Feature', properties: {}, geometry: W.borderMesh }),
+      coast: line({ type: 'Feature', properties: {}, geometry: W.coast }),
+      occ: { type: 'geojson', data: empty, tolerance: 0.3 },
+      rad: { type: 'geojson', data: empty },
+      front: { type: 'geojson', data: empty },
+      hl: { type: 'geojson', data: empty },
+    },
+    layers: [
+      { id: 'ocean', type: 'background', paint: { 'background-color': '#183847' } },
+      { id: 'grat', type: 'line', source: 'grat', paint: { 'line-color': '#ffffff', 'line-opacity': 0.05, 'line-width': 0.6 } },
+      // raised-land shadow (2.5D)
+      { id: 'shadow', type: 'fill', source: 'prov', paint: { 'fill-color': '#000', 'fill-opacity': 0.55, 'fill-antialias': false, 'fill-translate': ['interpolate', ['linear'], ['zoom'], 2, ['literal', [0.8, 1.3]], 6, ['literal', [2.5, 4]]] } },
+      { id: 'prov', type: 'fill', source: 'prov', paint: { 'fill-color': ['case', ['has', 'u'], '#e8eef3', ['to-color', ['coalesce', ['feature-state', 'c'], '#e9eef2']]] } },
+      { id: 'occ', type: 'fill', source: 'occ', paint: { 'fill-pattern': ['get', 'pat'] } },
+      { id: 'rad', type: 'fill', source: 'rad', paint: { 'fill-color': '#beff3c', 'fill-opacity': ['get', 'a'] } },
+      { id: 'provlines', type: 'line', source: 'prov', minzoom: 4, paint: { 'line-color': '#141414', 'line-width': 0.5, 'line-opacity': ['interpolate', ['linear'], ['zoom'], 4, 0.08, 6, 0.22] } },
+      { id: 'inner', type: 'line', source: 'inner', minzoom: 3, paint: { 'line-color': '#191919', 'line-width': ['interpolate', ['linear'], ['zoom'], 3, 0.5, 5, 0.8], 'line-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.12, 5.5, 0.4] } },
+      { id: 'borders', type: 'line', source: 'borders', paint: { 'line-color': '#0f1216', 'line-opacity': 0.85, 'line-width': ['interpolate', ['linear'], ['zoom'], 2, 0.8, 4, 1.2, 6, 1.8] } },
+      { id: 'coast', type: 'line', source: 'coast', paint: { 'line-color': '#0a1928', 'line-opacity': 0.9, 'line-width': 0.9 } },
+      { id: 'front-glow', type: 'line', source: 'front', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ff3c28', 'line-opacity': 0.35, 'line-width': 5 } },
+      { id: 'front', type: 'line', source: 'front', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ff4a2c', 'line-width': 1.8 } },
+      { id: 'hl', type: 'line', source: 'hl', paint: { 'line-color': ['get', 'col'], 'line-width': ['get', 'w'] } },
+    ],
+  };
+  const map = new maplibregl.Map({
+    container, style,
+    center: [R.view.lon, R.view.lat], zoom: 3,
+    minZoom: 1, maxZoom: 8, maxPitch: 0,
+    dragRotate: false, pitchWithRotate: false, touchPitch: false, keyboard: false,
+    doubleClickZoom: false, boxZoom: false, attributionControl: false,
+    fadeDuration: 0, renderWorldCopies: false,
+    canvasContextAttributes: { antialias: true },
+  });
+  map.touchZoomRotate.disableRotation();
+  R.map = map;
+  R.colorOf = new Array(W.provinces.length).fill(null);
+  map.on('render', () => HOA.drawOverlay(HOA.S));
+  window.addEventListener('resize', HOA.resize);
   HOA.resize();
+  return new Promise((resolve) => map.once('load', () => { HOA.syncView(); resolve(); }));
 };
 
 HOA.resize = function () {
@@ -50,35 +166,58 @@ HOA.resize = function () {
   const dpr = Math.min(2, window.devicePixelRatio || 1);
   const w = window.innerWidth, h = window.innerHeight;
   R.dpr = dpr; R.w = w; R.h = h;
-  for (const c of [R.canvas, R.base]) { c.width = Math.round(w * dpr); c.height = Math.round(h * dpr); }
-  R.fastBase.width = w; R.fastBase.height = h;
-  R.bgCache = null; R.bgFast = null;
-  R.canvas.style.width = w + 'px'; R.canvas.style.height = h + 'px';
-  R.baseDirty = true;
+  for (const c of [R.overlay, R.starsCanvas]) {
+    c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+    c.style.width = w + 'px'; c.style.height = h + 'px';
+  }
+  // space background with stars (static, drawn once per resize)
+  const bx = R.starsCanvas.getContext('2d');
+  bx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const bg = bx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.8);
+  bg.addColorStop(0, '#141c26'); bg.addColorStop(1, '#05070b');
+  bx.fillStyle = bg; bx.fillRect(0, 0, w, h);
+  for (const [x, y, s, a] of R.stars) { bx.fillStyle = `rgba(255,255,255,${0.15 + a * 0.5})`; bx.fillRect(x * w, y * h, s, s); }
+  if (R.map) R.map.resize();
 };
 
-HOA.applyView = function () {
-  const R = HOA.R;
-  R.proj.rotate([-R.view.lon, -R.view.lat]).scale(R.view.scale).translate([R.w / 2, R.h / 2 + 10]);
-  // drop geometry outside the viewport early (big win when zoomed in)
-  R.proj.clipExtent([[-20, -20], [R.w + 20, R.h + 20]]);
+// ---------- camera ----------
+// R.view.scale = screen px per radian at the view centre (the old d3 orthographic scale).
+// MapLibre's globe uses a perspective camera, so the visible rim is nearer than 90° and smaller than
+// `scale`: it is found by walking along a meridian until the projected distance stops growing.
+HOA.syncView = function () {
+  const R = HOA.R, m = R.map;
+  const c = m.getCenter();
+  const a = m.project(c);
+  const dir = c.lat >= 0 ? -1 : 1;
+  const dist = (deg) => { const b = m.project([c.lng, c.lat + dir * deg]); return Math.hypot(b.x - a.x, b.y - a.y); };
+  R.view.lon = c.lng;
+  R.view.lat = c.lat;
+  R.view.scale = dist(0.5) / ((0.5 * Math.PI) / 180);
+  let best = 0, bd = 0;
+  for (let d = 3; d <= 90; d += 3) { const v = dist(d); if (v > bd) { bd = v; best = d; } }
+  for (let d = best - 2.75; d <= best + 2.75; d += 0.25) { const v = dist(d); if (v > bd) { bd = v; best = d; } }
+  R.view.limb = bd; // rim radius in px
+  R.view.limbAngle = (best * Math.PI) / 180; // angular radius of the visible cap
+  R.view.cx = a.x; R.view.cy = a.y;
 };
-
-// angular radius of the globe area currently on screen
-HOA.viewRadius = function () {
-  const R = HOA.R;
-  const k = Math.hypot(R.w, R.h) / 2 / R.view.scale;
-  return k >= 1 ? Math.PI / 2 : Math.asin(k) + 0.04;
+HOA.setView = function (v) {
+  const R = HOA.R, m = R.map;
+  const lon = v.lon != null ? v.lon : R.view.lon;
+  const lat = v.lat != null ? Math.max(-85, Math.min(85, v.lat)) : R.view.lat;
+  m.jumpTo({ center: [((lon + 540) % 360) - 180, lat] });
+  if (v.scale) {
+    HOA.syncView();
+    m.jumpTo({ zoom: m.getZoom() + Math.log2(v.scale / R.view.scale) });
+  }
+  HOA.syncView();
 };
-HOA.meshVisible = function (parts, center, vr) {
-  const lines = [];
-  for (const p of parts) if (d3.geoDistance(p.c, center) < vr + p.r) lines.push(p.coords);
-  return { type: 'MultiLineString', coordinates: lines };
+HOA.project = function (ll) {
+  const p = HOA.R.map.project(ll);
+  return [p.x, p.y];
 };
-
 HOA.visible = function (lonlat, margin) {
   const R = HOA.R;
-  return d3.geoDistance(lonlat, [R.view.lon, R.view.lat]) < Math.PI / 2 - (margin || 0);
+  return d3.geoDistance(lonlat, [R.view.lon, R.view.lat]) < (R.view.limbAngle || Math.PI / 2) - (margin || 0);
 };
 
 // ---------- colours ----------
@@ -114,262 +253,65 @@ HOA.provColor = function (S, p) {
   }
 };
 
-// ---------- base layer ----------
-// Geometry level of detail by zoom; coarser while the user drags/zooms.
-HOA.pickLod = function (fast) {
-  const R = HOA.R, W = R.W;
-  const pxPerDeg = (R.view.scale * Math.PI) / 180;
-  const limit = fast ? 3.5 : 1.2;
-  for (const g of W.lods) if (g.eps * pxPerDeg <= limit) return g;
-  return W.lods[W.lods.length - 1];
-};
-
-HOA._hatch = {};
-HOA.hatchPattern = function (ctx, color) {
-  if (HOA._hatch[color]) return HOA._hatch[color];
+// occupation hatching: one 8×8 stripe image per owner colour
+HOA.hatchImage = function (color) {
+  const map = HOA.R.map;
+  const name = 'hatch-' + color;
+  if (map.hasImage(name)) return name;
   const c = document.createElement('canvas');
-  c.width = c.height = 8;
+  c.width = c.height = 16;
   const x = c.getContext('2d');
+  x.scale(2, 2);
   x.strokeStyle = color; x.lineWidth = 2.4; x.globalAlpha = 0.9;
   x.beginPath(); x.moveTo(-2, 10); x.lineTo(10, -2); x.moveTo(-2, 2); x.lineTo(2, -2); x.moveTo(6, 10); x.lineTo(10, 6); x.stroke();
-  return (HOA._hatch[color] = ctx.createPattern(c, 'repeat'));
+  map.addImage(name, x.getImageData(0, 0, 16, 16), { pixelRatio: 2 });
+  return name;
 };
 
-HOA.drawBase = function (S, fast) {
-  const R = HOA.R, W = R.W;
-  const cv = fast ? R.fastBase : R.base;
-  const ctx = cv.getContext('2d');
-  const dpr = fast ? 1 : R.dpr;
-  R.proj.precision(fast ? 2.5 : 0.8);
-  const path = d3.geoPath(R.proj, ctx);
-  const G = HOA.pickLod(fast);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  // space background (cached)
-  if (!R.bgCache || R.bgCache.width !== cv.width) {
-    const b = document.createElement('canvas');
-    b.width = cv.width; b.height = cv.height;
-    const bx = b.getContext('2d');
-    bx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const bg = bx.createRadialGradient(R.w / 2, R.h / 2, 0, R.w / 2, R.h / 2, Math.max(R.w, R.h) * 0.8);
-    bg.addColorStop(0, '#141c26'); bg.addColorStop(1, '#05070b');
-    bx.fillStyle = bg; bx.fillRect(0, 0, R.w, R.h);
-    for (const [x, y, s, a] of R.stars) { bx.fillStyle = `rgba(255,255,255,${0.15 + a * 0.5})`; bx.fillRect(x * R.w, y * R.h, s, s); }
-    if (!fast) R.bgCache = b; else R.bgFast = b;
-  }
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(fast ? R.bgFast || R.bgCache : R.bgCache, 0, 0, cv.width, cv.height);
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const [cx, cy] = R.proj.translate();
-  const rad = R.proj.scale();
-  const globeOnScreen = rad < Math.max(R.w, R.h) * 1.2;
-  if (globeOnScreen) {
-    const glow = ctx.createRadialGradient(cx, cy, rad * 0.98, cx, cy, rad * 1.12);
-    glow.addColorStop(0, 'rgba(110,170,230,0.45)');
-    glow.addColorStop(1, 'rgba(110,170,230,0)');
-    ctx.fillStyle = glow;
-    ctx.beginPath(); ctx.arc(cx, cy, rad * 1.12, 0, Math.PI * 2); ctx.fill();
-  }
-  const oc = ctx.createRadialGradient(cx - rad * 0.3, cy - rad * 0.35, rad * 0.1, cx, cy, rad);
-  oc.addColorStop(0, '#2a5a6e'); oc.addColorStop(0.7, '#183847'); oc.addColorStop(1, '#0d2230');
-  ctx.fillStyle = oc;
-  ctx.beginPath(); path({ type: 'Sphere' }); ctx.fill();
-  if (!fast) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.lineWidth = 0.6;
-    ctx.beginPath(); path(R.graticule); ctx.stroke();
-  }
-  const center = [R.view.lon, R.view.lat];
-  const vr = HOA.viewRadius();
-  const visFeat = [];
-  const land2d = new Path2D();
-  const fpath = new Map();
-  const colorCache = new Map();
-  const colorOf = (p) => {
+// Push game state into the WebGL layers. Colours go through feature-state (no geometry re-upload);
+// the small dynamic sources (occupation, radiation, front) are rebuilt only when their content changes.
+HOA.updateMapData = function (S) {
+  const R = HOA.R, W = R.W, map = R.map;
+  const cache = new Map();
+  for (let p = 0; p < W.provinces.length; p++) {
+    if (!W.provGeom[p]) continue;
     const t = S.ctrl[p];
-    let c = colorCache.get(t);
-    if (c === undefined) { c = HOA.provColor(S, p); colorCache.set(t, c); }
-    return c;
-  };
-  // countries with one colour and no occupation are filled as a single merged shape
-  const wholeFill = [];
-  for (const t in W.countryInfo) {
-    const ci = W.countryInfo[t];
-    if (d3.geoDistance(ci.c, center) > vr + ci.r) continue;
-    let col = null, simple = true;
-    for (const fi of ci.fis) {
-      for (const p of W.featProv[fi]) {
-        const c = colorOf(p);
-        if (col === null) col = c;
-        if (c !== col || S.ctrl[p] !== S.owner[p]) { simple = false; break; }
-      }
-      if (!simple) break;
-    }
-    // merged shape only when the whole country is roughly on screen; otherwise draw just the visible regions
-    if (simple && col !== null && ci.r <= vr * 1.2) {
-      const p2 = new Path2D();
-      d3.geoPath(R.proj, p2)(G.countries[t]);
-      land2d.addPath(p2);
-      wholeFill.push([p2, col]);
-      continue;
-    }
-    for (const fi of ci.fis) {
-      const info = W.featInfo[fi];
-      if (info.r < 0 || d3.geoDistance(info.c, center) > vr + info.r) continue;
-      visFeat.push(fi);
-      const p2 = new Path2D();
-      d3.geoPath(R.proj, p2)(G.features[fi]);
-      fpath.set(fi, p2);
-      land2d.addPath(p2);
-    }
+    let col = cache.get(t);
+    if (col === undefined) { col = HOA.provColor(S, p); cache.set(t, col); }
+    if (R.colorOf[p] !== col) { R.colorOf[p] = col; map.setFeatureState({ source: 'prov', id: p }, { c: col }); }
   }
-  // unowned land (Antarctica)
-  for (const fi of W.unowned) {
-    const info = W.featInfo[fi];
-    if (info.r < 0 || d3.geoDistance(info.c, center) > vr + info.r) continue;
-    visFeat.push(fi);
-    const p2 = new Path2D();
-    d3.geoPath(R.proj, p2)(G.features[fi]);
-    fpath.set(fi, p2);
-    land2d.addPath(p2);
+  // occupation
+  const occ = [];
+  let occKey = R.mode === 'political' ? 'p' : 'o';
+  for (let p = 0; p < W.provinces.length; p++) {
+    const o = S.owner[p];
+    if (!o || S.ctrl[p] === o || !W.provGeom[p]) continue;
+    occ.push(p);
+    occKey += ',' + p + o;
   }
-  // raised-land shadow (2.5D)
-  const off = Math.max(1.5, Math.min(5, rad / 900));
-  ctx.save();
-  ctx.translate(off * 0.5, off * 0.8);
-  ctx.fillStyle = 'rgba(0,0,0,0.55)';
-  ctx.fill(land2d);
-  ctx.restore();
-
-  for (const [p2, col] of wholeFill) { ctx.fillStyle = col; ctx.fill(p2); }
-  const hatch = [];
-  for (const fi of visFeat) {
-    const f = G.features[fi];
-    const provs = W.featProv[fi];
-    if (!provs.length) {
-      ctx.fillStyle = '#e8eef3';
-      ctx.fill(fpath.get(fi));
-      continue;
-    }
-    const col0 = colorOf(provs[0]);
-    let uniform = true, occ = false;
-    for (const p of provs) {
-      if (colorOf(p) !== col0) uniform = false;
-      if (S.ctrl[p] !== S.owner[p]) occ = true;
-    }
-    ctx.fillStyle = col0;
-    ctx.fill(fpath.get(fi));
-    if (!uniform && provs.length > 1) {
-      ctx.save();
-      ctx.clip(fpath.get(fi));
-      const groups = new Map();
-      for (const p of provs) {
-        const c = colorOf(p);
-        if (c === col0) continue;
-        if (!groups.has(c)) groups.set(c, []);
-        groups.get(c).push(p);
-      }
-      for (const [c, list] of groups) {
-        ctx.fillStyle = c;
-        ctx.beginPath();
-        for (const p of list) path(W.provinces[p].poly);
-        ctx.fill();
-      }
-      ctx.restore();
-    }
-    if (occ) hatch.push(fi);
+  if (occKey !== R.occKey) {
+    R.occKey = occKey;
+    map.getSource('occ').setData({
+      type: 'FeatureCollection',
+      features: occ.map((p) => ({ type: 'Feature', properties: { pat: HOA.hatchImage(R.mode === 'political' ? S.countries[S.owner[p]].color : 'rgba(255,255,255,0.5)') }, geometry: W.provGeom[p] })),
+    });
   }
-  // occupation hatching (owner colour stripes via cached pattern)
-  for (const fi of hatch) {
-    const f = G.features[fi];
-    const provs = W.featProv[fi];
-    const byOwner = new Map();
-    for (const p of provs) {
-      if (S.ctrl[p] === S.owner[p] || !S.owner[p]) continue;
-      const o = S.owner[p];
-      if (!byOwner.has(o)) byOwner.set(o, []);
-      byOwner.get(o).push(p);
-    }
-    for (const [o, list] of byOwner) {
-      ctx.fillStyle = HOA.hatchPattern(ctx, R.mode === 'political' ? S.countries[o].color : 'rgba(255,255,255,0.5)');
-      if (provs.length === 1) { ctx.fill(fpath.get(fi)); continue; }
-      ctx.save();
-      ctx.clip(fpath.get(fi));
-      ctx.beginPath();
-      for (const p of list) path(W.provinces[p].poly);
-      ctx.fill();
-      ctx.restore();
-    }
+  // radiation
+  let radKey = '';
+  const rad = [];
+  for (let p = 0; p < S.rad.length; p++) if (S.rad[p] > 0 && W.provGeom[p]) { rad.push(p); radKey += p + ':' + Math.round(S.rad[p] / 30) + ','; }
+  if (radKey !== R.radKey) {
+    R.radKey = radKey;
+    map.getSource('rad').setData({ type: 'FeatureCollection', features: rad.map((p) => ({ type: 'Feature', properties: { a: 0.2 + 0.25 * (S.rad[p] / 365) }, geometry: W.provGeom[p] })) });
   }
-  // texture, province borders, radiation (clipped to land)
-  const zoomBorders = !fast && rad > 1300;
-  const anyRad = S.rad.some((x) => x > 0);
-  if (!fast || anyRad) {
-    ctx.save();
-    ctx.clip(land2d);
-    if (!fast) {
-      ctx.globalAlpha = 0.07;
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.fillStyle = R.noisePat || (R.noisePat = ctx.createPattern(R.noise, 'repeat'));
-      ctx.fillRect(0, 0, R.w, R.h);
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.globalAlpha = 1;
-    }
-    if (zoomBorders) {
-      ctx.strokeStyle = 'rgba(20,20,20,' + Math.min(0.22, (rad - 1300) / 6000 + 0.08) + ')';
-      ctx.lineWidth = 0.5;
-      ctx.beginPath();
-      for (const fi of visFeat) {
-        const provs = W.featProv[fi];
-        if (provs.length < 2) continue;
-        for (const p of provs) {
-          const pr = W.provinces[p];
-          if (d3.geoDistance([pr.lon, pr.lat], center) < vr + 0.08) path(pr.poly);
-        }
-      }
-      ctx.stroke();
-    }
-    if (anyRad) for (let p = 0; p < S.rad.length; p++) {
-      if (S.rad[p] <= 0) continue;
-      const pr = W.provinces[p];
-      if (!HOA.visible([pr.lon, pr.lat])) continue;
-      ctx.fillStyle = `rgba(190,255,60,${0.2 + 0.25 * (S.rad[p] / 365)})`;
-      ctx.beginPath(); path(pr.poly || G.features[pr.fi]); ctx.fill();
-    }
-    ctx.restore();
+  // front lines
+  if (R.frontStale || !R.front) {
+    HOA.computeFront(S);
+    map.getSource('front').setData({ type: 'Feature', properties: {}, geometry: { type: 'MultiLineString', coordinates: R.front } });
   }
-  // borders
-  if (!fast && rad > 700) {
-    ctx.strokeStyle = `rgba(25,25,25,${Math.min(0.4, 0.12 + (rad - 700) / 5000)})`;
-    ctx.lineWidth = rad > 2000 ? 0.8 : 0.5;
-    ctx.beginPath(); path(HOA.meshVisible(G.innerMeshParts, center, vr)); ctx.stroke();
-  }
-  ctx.strokeStyle = 'rgba(15,18,22,0.85)';
-  ctx.lineWidth = Math.max(0.8, Math.min(1.8, rad / 1500));
-  ctx.beginPath(); path(HOA.meshVisible(G.borderMeshParts, center, vr)); ctx.stroke();
-  ctx.strokeStyle = 'rgba(10,25,40,0.9)';
-  ctx.lineWidth = 0.9;
-  ctx.beginPath(); path(HOA.meshVisible(G.coastParts, center, vr)); ctx.stroke();
-  // front lines (pre-trimmed to land, single path)
-  if (R.frontStale || !R.front) HOA.computeFront(S);
-  if (R.front.length) {
-    const fl = { type: 'MultiLineString', coordinates: R.front };
-    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-    ctx.beginPath(); path(fl);
-    if (!fast) { ctx.strokeStyle = 'rgba(255,60,40,0.35)'; ctx.lineWidth = 5; ctx.stroke(); }
-    ctx.strokeStyle = '#ff4a2c'; ctx.lineWidth = 1.8; ctx.stroke();
-  }
-  // globe shading (3D)
-  const sh = ctx.createRadialGradient(cx - rad * 0.35, cy - rad * 0.4, rad * 0.05, cx, cy, rad * 1.02);
-  sh.addColorStop(0, 'rgba(255,255,255,0.10)');
-  sh.addColorStop(0.45, 'rgba(255,255,255,0)');
-  sh.addColorStop(0.85, 'rgba(0,0,0,0.12)');
-  sh.addColorStop(1, 'rgba(0,0,0,0.45)');
-  ctx.fillStyle = sh;
-  ctx.beginPath(); path({ type: 'Sphere' }); ctx.fill();
-  HOA.drawLabels(S, ctx, path, fast);
 };
 
-// Border polyline between two provinces; Voronoi edges are trimmed to the country shape once and cached.
+// Border polyline between two provinces; Voronoi edges are trimmed to the region shape once and cached.
 HOA._frontCache = new Map();
 HOA.frontLines = function (a, b) {
   const W = HOA.R.W;
@@ -379,7 +321,7 @@ HOA.frontLines = function (a, b) {
   let out = raw;
   const A = W.provinces[a], B = W.provinces[b];
   if (raw && A.fi === B.fi) {
-    const f = W.lods[1].features[A.fi];
+    const f = W.features[A.fi];
     out = [];
     for (const line of raw) {
       let cur = [];
@@ -397,8 +339,7 @@ HOA.frontLines = function (a, b) {
 HOA.computeFront = function (S) {
   const R = HOA.R, W = R.W;
   const segs = [];
-  const P = W.provinces;
-  for (const a of P) {
+  for (const a of W.provinces) {
     const ca = S.ctrl[a.id];
     if (!ca) continue;
     for (const e of a.nb) {
@@ -413,9 +354,77 @@ HOA.computeFront = function (S) {
   R.frontStale = false;
 };
 
-HOA.drawLabels = function (S, ctx, path, fast) {
+// ---------- frame ----------
+// Called from the game loop each animation frame. Map data is pushed at most ~3× per second;
+// the overlay itself is drawn in MapLibre's 'render' event so it never lags behind the globe.
+HOA.drawFrame = function (S) {
   const R = HOA.R, W = R.W;
-  const rad = R.proj.scale();
+  const now = performance.now();
+  if (R.mapDirty && now - (R.lastData || 0) > 350) {
+    HOA.updateMapData(S);
+    R.mapDirty = false;
+    R.lastData = now;
+  }
+  const hlKey = R.hoverProv + '|' + R.selProv;
+  if (hlKey !== R.hlKey) {
+    R.hlKey = hlKey;
+    const feats = [];
+    for (const [p, col, w] of [[R.hoverProv, 'rgba(255,255,255,0.55)', 1.2], [R.selProv, '#ffe066', 2]]) {
+      if (p >= 0 && W.provGeom[p]) feats.push({ type: 'Feature', properties: { col, w }, geometry: W.provGeom[p] });
+    }
+    R.map.getSource('hl').setData({ type: 'FeatureCollection', features: feats });
+  }
+  // the overlay animates (unit movement, battle pulse, nuclear flashes): keep frames coming while it does
+  const animating = (S.player && !S.paused && !S.modalPause) || (S.battles && S.battles.length) || S.nukeFx.length || R.box;
+  if (animating) R.map.triggerRepaint();
+};
+
+HOA.drawOverlay = function (S) {
+  const R = HOA.R;
+  if (!S || !R.ctx) return;
+  HOA.syncView();
+  const ctx = R.ctx;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, R.overlay.width, R.overlay.height);
+  ctx.setTransform(R.dpr, 0, 0, R.dpr, 0, 0);
+  HOA.drawGlobeShade(ctx);
+  HOA.drawLabels(S, ctx);
+  HOA.drawOrders(S, ctx);
+  HOA.drawBattles(S, ctx);
+  HOA.drawUnits(S, ctx);
+  HOA.drawFx(S, ctx);
+  if (R.box) {
+    ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.fillStyle = 'rgba(255,224,102,0.08)';
+    const { x0, y0, x1, y1 } = R.box;
+    ctx.fillRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
+    ctx.setLineDash([]);
+  }
+};
+
+// atmosphere glow and 3D shading of the sphere (two gradients, only while the globe edge is on screen)
+HOA.drawGlobeShade = function (ctx) {
+  const R = HOA.R;
+  const rad = R.view.limb, cx = R.view.cx, cy = R.view.cy;
+  if (rad > Math.max(R.w, R.h) * 1.2) return;
+  const glow = ctx.createRadialGradient(cx, cy, rad * 0.98, cx, cy, rad * 1.12);
+  glow.addColorStop(0, 'rgba(110,170,230,0.45)');
+  glow.addColorStop(1, 'rgba(110,170,230,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(cx, cy, rad * 1.12, 0, Math.PI * 2); ctx.arc(cx, cy, rad, 0, Math.PI * 2, true); ctx.fill();
+  const sh = ctx.createRadialGradient(cx - rad * 0.35, cy - rad * 0.4, rad * 0.05, cx, cy, rad * 1.02);
+  sh.addColorStop(0, 'rgba(255,255,255,0.10)');
+  sh.addColorStop(0.45, 'rgba(255,255,255,0)');
+  sh.addColorStop(0.85, 'rgba(0,0,0,0.12)');
+  sh.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = sh;
+  ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+};
+
+HOA.drawLabels = function (S, ctx) {
+  const R = HOA.R, W = R.W;
+  const rad = R.view.scale;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   for (const tag in S.countries) {
@@ -423,25 +432,25 @@ HOA.drawLabels = function (S, ctx, path, fast) {
     const d = W.defs[tag];
     if (!c.alive || !d || !d.label) continue;
     if (!HOA.visible(d.label, 0.15)) continue;
-    if (S.owner[c.capital] !== tag && !HOA.ownsAny(S, tag)) continue;
     const size = Math.sqrt(d.labelArea) * rad * 0.16;
     if (size < 8) continue;
+    if (S.owner[c.capital] !== tag && !HOA.ownsAny(S, tag)) continue;
     const fs = Math.min(34, size);
-    const pt = R.proj(d.label);
+    const pt = HOA.project(d.label);
     ctx.font = `600 ${fs}px "Trebuchet MS", "Segoe UI", sans-serif`;
     ctx.fillStyle = 'rgba(15,15,15,0.55)';
-    const txt = c.name.toUpperCase();
-    HOA.spacedText(ctx, txt, pt[0], pt[1], fs * 0.12);
+    HOA.spacedText(ctx, c.name.toUpperCase(), pt[0], pt[1], fs * 0.12);
   }
   // cities
-  if (rad > 1500 && !fast) {
+  if (rad > 1500) {
     ctx.font = `500 11px "Segoe UI", sans-serif`;
     for (const p of W.provinces) {
       if (!p.city) continue;
       for (const ct of p.city) {
         if (ct.vp < (rad > 3000 ? 3 : 8)) continue;
         if (!HOA.visible([ct.lon, ct.lat], 0.05)) continue;
-        const [x, y] = R.proj([ct.lon, ct.lat]);
+        const [x, y] = HOA.project([ct.lon, ct.lat]);
+        if (x < -50 || y < -50 || x > R.w + 50 || y > R.h + 50) continue;
         ctx.fillStyle = ct.cap ? '#f5d76e' : '#f2f2f2';
         ctx.strokeStyle = '#111';
         ctx.lineWidth = 1;
@@ -488,55 +497,9 @@ HOA.star = function (ctx, x, y, r, r2) {
   ctx.closePath();
 };
 
-// ---------- frame ----------
-HOA.drawFrame = function (S) {
-  const R = HOA.R, W = R.W;
-  HOA.applyView();
-  const now = performance.now();
-  const interacting = now < (R.interactUntil || 0);
-  if (R.baseDirty || (R.mapDirty && now - (R.lastBase || 0) > 350) || (!interacting && R.baseFast)) {
-    HOA.drawBase(S, interacting);
-    R.proj.precision(2);
-    R.baseFast = interacting;
-    R.baseDirty = false;
-    R.mapDirty = false;
-    R.lastBase = now;
-  }
-  const ctx = R.ctx;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.drawImage(R.baseFast ? R.fastBase : R.base, 0, 0, R.canvas.width, R.canvas.height);
-  HOA.applyView();
-  ctx.setTransform(R.dpr, 0, 0, R.dpr, 0, 0);
-  const path = d3.geoPath(R.proj, ctx);
-  // selected / hovered province outline
-  for (const [p, col, w] of [[R.hoverProv, 'rgba(255,255,255,0.55)', 1.2], [R.selProv, '#ffe066', 2]]) {
-    if (p < 0) continue;
-    const pr = W.provinces[p];
-    if (!HOA.visible([pr.lon, pr.lat])) continue;
-    ctx.save();
-    const lf = HOA.pickLod(true).features[pr.fi];
-    ctx.beginPath(); path(lf); ctx.clip();
-    ctx.strokeStyle = col; ctx.lineWidth = w;
-    ctx.beginPath(); path(pr.poly || lf); ctx.stroke();
-    ctx.restore();
-  }
-  HOA.drawOrders(S, ctx);
-  HOA.drawBattles(S, ctx);
-  HOA.drawUnits(S, ctx);
-  HOA.drawFx(S, ctx);
-  if (R.box) {
-    ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-    ctx.fillStyle = 'rgba(255,224,102,0.08)';
-    const { x0, y0, x1, y1 } = R.box;
-    ctx.fillRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
-    ctx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
-    ctx.setLineDash([]);
-  }
-};
-
 HOA.provXY = function (p) {
   const pr = HOA.R.W.provinces[p];
-  return HOA.R.proj([pr.lon, pr.lat]);
+  return HOA.project([pr.lon, pr.lat]);
 };
 
 HOA.drawOrders = function (S, ctx) {
@@ -555,7 +518,7 @@ HOA.drawOrders = function (S, ctx) {
     for (const p of pts) {
       const pr = W.provinces[p];
       if (!HOA.visible([pr.lon, pr.lat])) { vis = false; break; }
-      xy.push(R.proj([pr.lon, pr.lat]));
+      xy.push(HOA.project([pr.lon, pr.lat]));
     }
     if (!vis || xy.length < 2) continue;
     const attack = HOA.atWar(S, u.tag, S.ctrl[u.path[0]]);
@@ -563,11 +526,9 @@ HOA.drawOrders = function (S, ctx) {
     ctx.lineWidth = sel ? 2.4 : 1.6;
     ctx.beginPath();
     ctx.moveTo(xy[0][0], xy[0][1]);
-    // progress along first leg
     for (let i = 1; i < xy.length; i++) ctx.lineTo(xy[i][0], xy[i][1]);
     ctx.stroke();
-    const a = xy[xy.length - 2], b = xy[xy.length - 1];
-    HOA.arrowHead(ctx, a, b, sel ? 9 : 7);
+    HOA.arrowHead(ctx, xy[xy.length - 2], xy[xy.length - 1], sel ? 9 : 7);
   }
 };
 HOA.arrowHead = function (ctx, a, b, s) {
@@ -582,12 +543,12 @@ HOA.arrowHead = function (ctx, a, b, s) {
 };
 
 HOA.drawBattles = function (S, ctx) {
-  const R = HOA.R, W = R.W;
+  const W = HOA.R.W;
   if (!S.battles) return;
   for (const b of S.battles) {
     const pr = W.provinces[b.p];
     if (!HOA.visible([pr.lon, pr.lat], 0.02)) continue;
-    const [x, y] = R.proj([pr.lon, pr.lat]);
+    const [x, y] = HOA.project([pr.lon, pr.lat]);
     const adv = b.A / (b.A + b.D + 0.01);
     const playerAtt = b.atTag === S.player || (S.player && HOA.allies(S, S.player, b.atTag) && !HOA.atWar(S, S.player, b.atTag));
     const good = playerAtt ? adv : 1 - adv;
@@ -635,9 +596,8 @@ HOA.drawUnits = function (S, ctx) {
   const groups = new Map();
   for (const u of S.units) {
     if (u.tr) continue;
-    const key = u.p;
-    if (!groups.has(key)) groups.set(key, new Map());
-    const g = groups.get(key);
+    if (!groups.has(u.p)) groups.set(u.p, new Map());
+    const g = groups.get(u.p);
     if (!g.has(u.tag)) g.set(u.tag, []);
     g.get(u.tag).push(u);
   }
@@ -645,7 +605,8 @@ HOA.drawUnits = function (S, ctx) {
   for (const [p, byTag] of groups) {
     const pr = W.provinces[p];
     if (!HOA.visible([pr.lon, pr.lat], 0.02)) continue;
-    const [x0, y0] = R.proj([pr.lon, pr.lat]);
+    const [x0, y0] = HOA.project([pr.lon, pr.lat]);
+    if (x0 < -60 || y0 < -40 || x0 > R.w + 60 || y0 > R.h + 40) continue;
     const tags = [...byTag.keys()];
     tags.forEach((tag, i) => {
       const list = byTag.get(tag);
@@ -655,13 +616,13 @@ HOA.drawUnits = function (S, ctx) {
         if (small && !involved) return;
         ctx.fillStyle = c.color;
         ctx.strokeStyle = '#000';
+        ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(x0 + i * 5, y0, 2.5 + Math.min(3, list.length * 0.3), 0, Math.PI * 2); ctx.fill(); ctx.stroke();
         return;
       }
       const wBox = 44, hBox = 17;
       const x = x0 - wBox / 2 + (i - (tags.length - 1) / 2) * (wBox + 3);
-      const moving = list.some((u) => u.path.length);
-      const y = y0 - hBox / 2 - (moving ? 0 : 0);
+      const y = y0 - hBox / 2;
       const sel = list.some((u) => R.selected.has(u.id));
       // shadow (2.5D)
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -709,7 +670,7 @@ HOA.drawUnits = function (S, ctx) {
     const k = Math.max(0, Math.min(1, (S.t - u.tr.t0) / (u.tr.eta - u.tr.t0)));
     const pt = d3.geoInterpolate([a.lon, a.lat], [b.lon, b.lat])(k);
     if (!HOA.visible(pt)) continue;
-    const [x, y] = R.proj(pt);
+    const [x, y] = HOA.project(pt);
     ctx.fillStyle = S.countries[u.tag].color;
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 1;
@@ -721,13 +682,13 @@ HOA.drawUnits = function (S, ctx) {
 };
 
 HOA.drawFx = function (S, ctx) {
-  const R = HOA.R, W = R.W;
+  const W = HOA.R.W;
   const now = Date.now();
   S.nukeFx = S.nukeFx.filter((f) => now - f.t < 4500);
   for (const f of S.nukeFx) {
     const pr = W.provinces[f.p];
     if (!HOA.visible([pr.lon, pr.lat])) continue;
-    const [x, y] = R.proj([pr.lon, pr.lat]);
+    const [x, y] = HOA.project([pr.lon, pr.lat]);
     const k = (now - f.t) / 4500;
     if (f.intercepted) {
       ctx.strokeStyle = `rgba(120,200,255,${1 - k})`;
@@ -749,27 +710,11 @@ HOA.drawFx = function (S, ctx) {
 };
 
 // ---------- picking ----------
+// GPU-side hit test: MapLibre returns the rendered feature under the cursor.
 HOA.pickProvince = function (x, y) {
-  const R = HOA.R, W = R.W;
-  const ll = R.proj.invert([x, y]);
-  if (!ll || isNaN(ll[0]) || !HOA.visible(ll)) return -1;
-  // candidate features from nearest seeds
-  const cands = [];
-  for (const p of W.provinces) {
-    const d = d3.geoDistance(ll, [p.lon, p.lat]);
-    if (d < 0.14) cands.push([d, p]);
-  }
-  cands.sort((a, b) => a[0] - b[0]);
-  const feats = [...new Set(cands.slice(0, 12).map((c) => c[1].fi))];
-  for (const fi of feats) {
-    if (!d3.geoContains(W.features[fi], ll)) continue;
-    let best = -1, bd = 1e9;
-    for (const id of W.featProv[fi]) {
-      const d = d3.geoDistance(ll, [W.provinces[id].lon, W.provinces[id].lat]);
-      if (d < bd) { bd = d; best = id; }
-    }
-    return best;
-  }
+  const R = HOA.R;
+  const hits = R.map.queryRenderedFeatures([x, y], { layers: ['prov'] });
+  for (const f of hits) if (f.id < UNOWNED_ID) return f.id;
   return -1;
 };
 HOA.pickCounter = function (x, y) {
@@ -780,3 +725,64 @@ HOA.pickCounter = function (x, y) {
   }
   return null;
 };
+
+// ---------- preload ----------
+// Generate everything that is otherwise created lazily mid-game (flag/unit bitmaps, hatch
+// patterns, WebGL shader programs) while the loading screen is still up, so nothing hitches later.
+HOA.FLAG_SIZES = [[18, 12], [24, 16], [30, 20], [36, 24], [48, 32], [60, 40], [72, 48]];
+HOA._preloaded = []; // keeps decoded <img> objects alive so the browser does not evict them
+HOA.preloadAssets = async function (S, progress) {
+  const R = HOA.R, map = R.map;
+  const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
+  const decode = (src) => {
+    const img = new Image();
+    img.src = src;
+    HOA._preloaded.push(img);
+    return img.decode().catch(() => {});
+  };
+
+  // 1) shader warm-up: give the empty dynamic layers one feature each and let MapLibre draw them
+  progress('Připravuji grafiku…');
+  const tags = Object.keys(S.countries);
+  const p0 = firstDrawnProv(R.W);
+  if (p0 >= 0) {
+    const g = R.W.provGeom[p0];
+    const pr = R.W.provinces[p0];
+    const pt = [pr.lon, pr.lat], pt2 = [pr.lon + 0.5, pr.lat + 0.5];
+    map.getSource('occ').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { pat: HOA.hatchImage('#ffffff') }, geometry: g }] });
+    map.getSource('rad').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { a: 0.01 }, geometry: g }] });
+    map.getSource('front').setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [pt, pt2] } });
+    map.getSource('hl').setData({ type: 'FeatureCollection', features: [{ type: 'Feature', properties: { col: '#ffffff', w: 1 }, geometry: { type: 'LineString', coordinates: [pt, pt2] } }] });
+    // timeout: 'idle' never fires in a background tab
+    await new Promise((r) => { map.once('idle', r); setTimeout(r, 2000); map.triggerRepaint(); });
+    const empty = { type: 'FeatureCollection', features: [] };
+    for (const id of ['occ', 'rad', 'front', 'hl']) map.getSource(id).setData(empty);
+    R.occKey = R.radKey = R.front = undefined;
+  }
+
+  // 2) occupation hatch patterns for every country colour (+ the neutral one for non-political modes)
+  HOA.hatchImage('rgba(255,255,255,0.5)');
+  for (const t of tags) HOA.hatchImage(S.countries[t].color);
+
+  // 3) flags in every size the UI uses, then unit symbols for armies that exist at start
+  const jobs = [];
+  for (const t of tags) for (const [w, h] of HOA.FLAG_SIZES) jobs.push(() => HOA.flagURL(t, w, h));
+  const seen = new Set();
+  for (const u of S.units) {
+    const col = S.countries[u.tag].color, k = u.type + col;
+    if (!seen.has(k)) { seen.add(k); jobs.push(() => HOA.symURL(u.type, col)); }
+  }
+  const decodes = [];
+  let t0 = performance.now();
+  for (let i = 0; i < jobs.length; i++) {
+    decodes.push(decode(jobs[i]()));
+    if (performance.now() - t0 > 30) {
+      progress(`Připravuji vlajky a symboly… ${Math.round((i / jobs.length) * 100)} %`);
+      await yieldFrame();
+      t0 = performance.now();
+    }
+  }
+  progress('Dekóduji textury…');
+  await Promise.all(decodes);
+};
+function firstDrawnProv(W) { for (let p = 0; p < W.provinces.length; p++) if (W.provGeom[p]) return p; return -1; }

@@ -12,8 +12,11 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; overflow: hidden; background: #05070b; color: var(--text); font: 13px/1.4 "Segoe UI", "Helvetica Neue", Roboto, Arial, sans-serif; user-select: none; }
-canvas#map { position: fixed; inset: 0; display: block; cursor: grab; }
-canvas#map:active { cursor: grabbing; }
+#stars { position: fixed; inset: 0; display: block; }
+#map { position: fixed; inset: 0; background: transparent; }
+#map .maplibregl-canvas-container.maplibregl-interactive { cursor: grab; }
+#map .maplibregl-canvas-container.maplibregl-interactive:active { cursor: grabbing; }
+#overlay { position: fixed; inset: 0; display: block; pointer-events: none; }
 button { font: inherit; color: inherit; }
 .hidden { display: none !important; }
 .ingame { display: none !important; }
